@@ -63,7 +63,7 @@ def _get_mongo_client_cached():
     return client
 
 mongo_client = _get_mongo_client_cached()
-db = mongo_client[_MONGO_DBNAME]
+db = mongo_client[MONGO_DB]
 
 MONGO_USERS = "userInfo"
 LOGIN_EVENTS = "loginEvents"
@@ -1160,6 +1160,7 @@ with st.container(border=True):
         except Exception:
             # fallback if streamlit_autorefresh isn't installed
             st.rerun()
+
 
 
 
