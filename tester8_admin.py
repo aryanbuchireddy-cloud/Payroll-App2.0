@@ -988,7 +988,7 @@ with st.container(border=True):
 
 
     c1, c2 = st.columns(2)
-    check_clicked = c1.button("Payroll readiness check", width="stretch", disabled=readiness_running, key="btn_check_ready")
+    check_clicked = c1.button("Payroll readiness check",  use_container_width=True, disabled=readiness_running, key="btn_check_ready")
 
     run_disabled = payroll_running
     run_clicked = c2.button("Run payroll", width="stretch", disabled=run_disabled, key="btn_run_payroll")
