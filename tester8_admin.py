@@ -517,7 +517,7 @@ st.markdown("<h2 style='margin-top:0'>💈 Payroll Portal</h2>", unsafe_allow_ht
 with st.sidebar:
     if ss.auth_user:
         st.write(f"Signed in as **{ss.auth_user}**")
-        if st.button("Sign out", width="stretch", key="btn_signout"):
+        if st.button("Sign out", use_container_width=True, key="btn_signout"):
             _clear_readiness_state(users, ss.auth_user)
             ss.auth_user = None
             ss.onboarding_mode = False
@@ -629,7 +629,7 @@ if menu == "Admin":
         new_role = st.selectbox("Role", ["user", "admin"], index=0, key="adm_create_role")
         enabled = st.checkbox("Enabled", value=True, key="adm_create_enabled")
         temp_pw = st.text_input("Temp portal password (user will change it during setup)", type="password", key="adm_create_temp_pw")
-        create = st.form_submit_button("Create / Update", type="primary", width="stretch")
+        create = st.form_submit_button("Create / Update", type="primary",  use_container_width=True)
 
     if create:
         if not new_u.strip():
@@ -674,7 +674,7 @@ if menu == "Admin":
             st.rerun()
 
     st.markdown("### Soft delete user")
-    if st.button("Soft delete", width="stretch", key="adm_soft_delete_btn"):
+    if st.button("Soft delete", use_container_width=True, key="adm_soft_delete_btn"):
         if not target:
             st.error("Select an account first.")
         elif target == ss.auth_user:
@@ -685,7 +685,7 @@ if menu == "Admin":
             st.rerun()
 
     st.markdown("### Reset portal password (unset)")
-    if st.button("Reset portal password", width="stretch", key="adm_reset_pw_btn"):
+    if st.button("Reset portal password",use_container_width=True, key="adm_reset_pw_btn"):
         if not target:
             st.error("Select an account first.")
         else:
@@ -747,7 +747,7 @@ if ss.onboarding_mode or not user_rec.get("profile_completed") or needs_setup:
                 hl_user, hl_pass = "", ""
 
         agree = st.checkbox("I confirm the above credentials are correct.", value=False, key="setup_agree")
-        done = st.form_submit_button("Save", type="primary", width="stretch")
+        done = st.form_submit_button("Save", type="primary", use_container_width=True)
 
     if done:
         if must_change_pw:
@@ -933,7 +933,7 @@ with st.expander("🔑 Update external passwords (SalonData / Heartland)", expan
         st.markdown("### SalonData password")
         sd_pw1 = st.text_input("New SalonData password", type="password", key="pwupd_sd_1")
         sd_pw2 = st.text_input("Confirm", type="password", key="pwupd_sd_2")
-        if st.button("Update SalonData password", width="stretch", key="pwupd_sd_btn"):
+        if st.button("Update SalonData password",use_container_width=True, key="pwupd_sd_btn"):
             if not sd_pw1.strip() or not sd_pw2.strip():
                 st.error("Enter and confirm the new SalonData password.")
             elif sd_pw1 != sd_pw2:
@@ -951,7 +951,7 @@ with st.expander("🔑 Update external passwords (SalonData / Heartland)", expan
         st.markdown("### Heartland password")
         hl_pw1 = st.text_input("New Heartland password", type="password", key="pwupd_hl_1")
         hl_pw2 = st.text_input("Confirm", type="password", key="pwupd_hl_2")
-        if st.button("Update Heartland password", width="stretch", key="pwupd_hl_btn"):
+        if st.button("Update Heartland password",  use_container_width=True, key="pwupd_hl_btn"):
             if not hl_pw1.strip() or not hl_pw2.strip():
                 st.error("Enter and confirm the new Heartland password.")
             elif hl_pw1 != hl_pw2:
@@ -1132,7 +1132,7 @@ with st.container(border=True):
 
     st.markdown("### Heartland MFA")
     mfa_code_input = st.text_input("Heartland MFA code", placeholder="6-digit code", key="mfa_code_input")
-    if st.button("Submit MFA", width="stretch", key="btn_submit_mfa"):
+    if st.button("Submit MFA",  use_container_width=True, key="btn_submit_mfa"):
         if mfa_code_input.strip():
             users.update_one({"username": ss.auth_user}, {"$set": {"mfa_code": mfa_code_input.strip()}})
             st.success("MFA submitted. Automation will continue when it sees it.")
