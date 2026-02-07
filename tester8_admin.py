@@ -5,6 +5,7 @@ import hashlib
 import pandas as pd
 
 import streamlit as st
+from cryptography.fernet import Fernet
 try:
     from streamlit_autorefresh import st_autorefresh
 except Exception:
