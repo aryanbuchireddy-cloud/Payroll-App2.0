@@ -18,10 +18,46 @@ from crypto_utils import encrypt_str
 from payrollrunner_dbkeys import run_payroll_for_user, check_payroll_ready_for_user
 
 # Simulate an env var for local dev in Thonny (if needed)
-os.environ.setdefault(
-    "PAYROLL_ENC_KEY",
-    os.environ.get("PAYROLL_ENC_KEY", "Y7-Dsht3fzSZ3b9RiuxpYgIqnPefA30nNB6s84iQCoA=")
-)
+def _get_payroll_enc_key() -> str:
+    """
+    Pull Fernet key from Streamlit secrets first, then env vars.
+    Returns a base64 Fernet key string.
+    """
+    # 1) Streamlit secrets
+    try:
+        k = st.secrets.get("PAYROLL_ENC_KEY", None)
+        if k:
+            return str(k).strip()
+    except Exception:
+        pass
+
+    # 2) Environment variables
+    k = os.getenv("PAYROLL_ENC_KEY", "").strip()
+    if k:
+        return k
+
+    raise RuntimeError(
+        "PAYROLL_ENC_KEY is missing. Add it to Streamlit secrets or set it as an environment variable."
+    )
+
+PAYROLL_ENC_KEY = _get_payroll_enc_key()
+
+# Validate key early (nice error instead of crashing later)
+try:
+    Fernet(PAYROLL_ENC_KEY.encode("utf-8"))
+except Exception as e:
+    raise RuntimeError(
+        "PAYROLL_ENC_KEY is invalid. It must be a valid Fernet base64 key "
+        "(example: output of cryptography.fernet.Fernet.generate_key())."
+    ) from e
+
+_fernet = Fernet(PAYROLL_ENC_KEY.encode("utf-8"))
+
+def encrypt_str(s: str) -> str:
+    return _fernet.encrypt((s or "").encode("utf-8")).decode("utf-8")
+
+def decrypt_str(token: str) -> str:
+    return _fernet.decrypt((token or "").encode("utf-8")).decode("utf-8")
 
 st.set_page_config(page_title="Payroll Portal", page_icon="💈", layout="centered")
 
