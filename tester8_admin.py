@@ -35,27 +35,26 @@ DEFAULT_ORG_ID = "default"  # kept, but NOT used for employee key UI anymore
 import os
 from pymongo import MongoClient
 
-def _get_mongo_uri_and_db():
-    # Prefer Streamlit secrets (for Streamlit Cloud)
+def _get_mongo_uri() -> str:
+    # Try Streamlit secrets if Streamlit exists (Cloud)
     try:
+        import streamlit as st  # only if available
         uri = st.secrets.get("MONGO_URI")
-        dbname = st.secrets.get("MONGO_DB")
         if uri:
-            return uri, (dbname or "payrollapp")
+            return str(uri).strip()
     except Exception:
         pass
 
-    # Fallback: environment variables (for local/dev)
-    uri = os.getenv("MONGO_URI")
-    dbname = os.getenv("MONGO_DB", "payrollapp")
+    # Env var
+    uri = os.getenv("MONGO_URI", "").strip()
+    if uri:
+        return uri
 
-    # Last fallback: local Mongo (only if nothing provided)
-    if not uri:
-        uri = "mongodb://localhost:27017"
+    # Local fallback
+    return "mongodb://localhost:27017"
 
-    return uri, dbname
-
-MONGO_URI, _MONGO_DBNAME = _get_mongo_uri_and_db()
+MONGO_URI = _get_mongo_uri()
+MONGO_DB="payrollapp"
 
 @st.cache_resource
 def _get_mongo_client_cached():
