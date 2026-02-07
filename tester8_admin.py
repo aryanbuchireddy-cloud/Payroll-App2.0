@@ -534,7 +534,7 @@ if not ss.auth_user:
         st.subheader("Sign in")
         username = st.text_input("Username", placeholder="you@example.com", key="login_user")
         password = st.text_input("Password (portal password)", type="password", placeholder="Temp password (if admin gave you one)", key="login_pass")
-        submit = st.form_submit_button("Continue", type="primary", width="stretch")
+        submit = st.form_submit_button("Continue", type="primary", use_container_width=True)
 
     if submit:
         if not username.strip():
