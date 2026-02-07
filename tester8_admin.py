@@ -49,7 +49,7 @@ except Exception as e:
     raise RuntimeError(
         "PAYROLL_ENC_KEY is invalid. It must be a valid Fernet base64 key "
         "(example: output of cryptography.fernet.Fernet.generate_key())."
-    ) from e
+    )
 
 _fernet = Fernet(PAYROLL_ENC_KEY.encode("utf-8"))
 
