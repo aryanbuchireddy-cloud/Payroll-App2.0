@@ -616,7 +616,7 @@ if menu == "Admin":
             "disabled_reason", "created_at", "last_login_at"
         ] if c in dfu.columns]
 
-        st.dataframe(dfu[show_cols] if show_cols else dfu, width="stretch", hide_index=True)
+        st.dataframe(dfu[show_cols] if show_cols else dfu,  use_container_width=True, hide_index=True)
     else:
         st.info("No accounts found.")
 
@@ -657,7 +657,7 @@ if menu == "Admin":
     reason = st.text_input("Disable reason (optional)", placeholder="Non-payment etc.", key="adm_disable_reason")
 
     c1, c2 = st.columns(2)
-    if c1.button("Enable", width="stretch", disabled=False, key="adm_enable_btn"):
+    if c1.button("Enable",  use_container_width=True, disabled=False, key="adm_enable_btn"):
         if not target:
             st.error("Select an account first.")
         else:
@@ -665,7 +665,7 @@ if menu == "Admin":
             st.success(f"Enabled: {target}")
             st.rerun()
 
-    if c2.button("Disable", width="stretch", disabled=False, key="adm_disable_btn"):
+    if c2.button("Disable",  use_container_width=True, disabled=False, key="adm_disable_btn"):
         if not target:
             st.error("Select an account first.")
         else:
@@ -991,7 +991,7 @@ with st.container():
     check_clicked = c1.button("Payroll readiness check",  use_container_width=True, disabled=readiness_running, key="btn_check_ready")
 
     run_disabled = payroll_running
-    run_clicked = c2.button("Run payroll", width="stretch", disabled=run_disabled, key="btn_run_payroll")
+    run_clicked = c2.button("Run payroll",  use_container_width=True, disabled=run_disabled, key="btn_run_payroll")
 
     if check_clicked:
         _clear_readiness_state(users, ss.auth_user)
