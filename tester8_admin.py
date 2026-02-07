@@ -970,7 +970,7 @@ latest_user = _mongo_get_user(users, ss.auth_user) or {}
 readiness_status = latest_user.get("readiness_status") or {}
 r_state = str(readiness_status.get("state") or "").strip().lower()
 
-with st.container(border=True):
+with st.container():
     st.subheader("Actions")
 
     readiness_running = bool(ss.readiness_thread and ss.readiness_thread.is_alive())
