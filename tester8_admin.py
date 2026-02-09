@@ -17,6 +17,20 @@ from pymongo.errors import DuplicateKeyError, ConnectionFailure
 
 from crypto_utils import encrypt_str
 from payrollrunner_dbkeys import run_payroll_for_user, check_payroll_ready_for_user
+import os, subprocess, sys
+
+def ensure_chromium():
+    try:
+        # only install once
+        if os.environ.get("PLAYWRIGHT_BROWSERS_INSTALLED") == "1":
+            return
+        subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
+        os.environ["PLAYWRIGHT_BROWSERS_INSTALLED"] = "1"
+    except Exception as e:
+        raise RuntimeError(f"Playwright browser install failed at runtime: {e}")
+
+ensure_chromium()
+
 
 # Simulate an env var for local dev in Thonny (if needed)
 def _get_payroll_enc_key() -> str:
