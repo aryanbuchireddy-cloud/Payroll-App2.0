@@ -10,19 +10,6 @@ cryptography==41.0.7
 playwright==1.40.0
 python-dotenv==1.0.0
 reportlab==4.0.4
-libnss3
-libnspr4
-libatk1.0-0
-libatk-bridge2.0-0
-libxkbcommon0
-libxcomposite1
-libxdamage1
-libxrandr2
-libgbm1
-libasound2
-libpangocairo-1.0-0
-libpango-1.0-0
-libgtk-3-0
 
 
 
