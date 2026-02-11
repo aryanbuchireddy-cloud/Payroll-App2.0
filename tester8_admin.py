@@ -1168,7 +1168,7 @@ with st.container():
 
     # Status display
     if (t is not None and t.is_alive()) or (p_state == "running"):
-        st.info("⏳ Payroll is currently running…")
+        st.info("⏳ Payroll is currently running. When you get the mfa code please type it in")
     elif ss.payroll_thread_started and (t is None or (not t.is_alive())):
         if p_state == "failed" or (p_err and p_state != "completed"):
             st.error(f"❌ Payroll failed: {_friendly_error(p_err)}")
@@ -1211,6 +1211,7 @@ with st.container():
         except Exception:
             # fallback if streamlit_autorefresh isn't installed
             st.rerun()
+
 
 
 
