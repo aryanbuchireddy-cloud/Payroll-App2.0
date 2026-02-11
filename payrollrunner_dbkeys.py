@@ -65,7 +65,7 @@ HEARTLAND_MULTIACCOUNT_PICK = {
 HEARTLAND_EMPLOYEEID_REPORT_PICK={
     #portal username left
     #client picker right
-    "quopayroll@gmail.com" : {"match": "Employee id", "index":0},
+    "quopayroll@gmail.com" : {"match": "Employee id", "index":1},
     "owner@example.com" : {"match": "Employee id", "index":0},
 }
 
