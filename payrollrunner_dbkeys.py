@@ -1783,6 +1783,16 @@ def _clean_keys_df(keys_df: pd.DataFrame) -> pd.DataFrame:
         keys_df[col] = keys_df[col].mask(keys_df[col].str.lower().isin(["nan", "none", "<na>"]), "")
     return keys_df
 
+import re
+
+def _emp_key(name: str) -> str:
+    # "KRISTI  BRUNET" -> "kristi brunet"
+    s = (name or "").strip()
+    s = re.sub(r"\s+", " ", s)              # collapse multiple spaces
+    s = re.sub(r"[^a-zA-Z0-9 ]+", "", s)    # remove punctuation
+    return s.lower().strip()
+
+
 
 def format_csv_for_heartland(
     input_csv_path: str,
@@ -1806,7 +1816,16 @@ def format_csv_for_heartland(
         keys_df = _clean_keys_df(keys_df)
 
         # Merge key info
-        merged = payroll_df.merge(keys_df, on="Employee", how="left", indicator=True)
+        payroll_df["EmployeeKey"] = payroll_df["Employee"].astype(str).map(_emp_key)
+        keys_df["EmployeeKey"] = keys_df["Employee"].astype(str).map(_emp_key)
+        
+        merged = payroll_df.merge(
+            keys_df.drop(columns=["Employee"], errors="ignore"),
+            on="EmployeeKey",
+            how="left",
+            indicator=True
+        )
+
 
         missing = merged[merged["_merge"] == "left_only"].copy()
         if not missing.empty:
