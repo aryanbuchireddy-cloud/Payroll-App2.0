@@ -1163,7 +1163,7 @@ with st.container():
 
             def _payroll_worker(username: str):
                 try:
-                    run_payroll_for_user(username)
+                    run_payroll_for_user(username, period_end_date=selected_payroll_date)
                 except Exception as e:
                     print("Background payroll error:", repr(e))
 
@@ -1247,6 +1247,7 @@ with st.container():
         except Exception:
             # fallback if streamlit_autorefresh isn't installed
             st.rerun()
+
 
 
 
