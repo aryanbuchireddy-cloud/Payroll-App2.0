@@ -1028,20 +1028,21 @@ with st.expander("🔑 Update external passwords (SalonData / Heartland)", expan
                     st.success("✅ Heartland password updated.")
                 else:
                     st.error("Could not update Heartland password (Heartland must be configured first).")
-check_clicked = c1.button(
-    "Payroll readiness check",
-    use_container_width=True,
-    disabled=(readiness_running or not is_valid_friday),
-    key="btn_check_ready"
+st.divider()
+st.subheader("Payroll Period End (Friday only)")
+
+default_friday = _default_payroll_friday(date.today())
+
+selected_payroll_date = st.date_input(
+    "Select payroll Friday",
+    value=default_friday,
+    key="selected_payroll_date"
 )
 
-run_disabled = payroll_running or not is_valid_friday
-run_clicked = c2.button(
-    "Run payroll",
-    use_container_width=True,
-    disabled=run_disabled,
-    key="btn_run_payroll"
-)
+is_valid_friday = _is_friday(selected_payroll_date)
+
+if not is_valid_friday:
+    st.warning("Payroll can only be run for a Friday. Please select a Friday to enable actions.")
 # ---- Actions ----
 latest_user = _mongo_get_user(users, ss.auth_user) or {}
 readiness_status = latest_user.get("readiness_status") or {}
@@ -1237,6 +1238,7 @@ with st.container():
         except Exception:
             # fallback if streamlit_autorefresh isn't installed
             st.rerun()
+
 
 
 
