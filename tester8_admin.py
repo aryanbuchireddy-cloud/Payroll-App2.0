@@ -1066,11 +1066,20 @@ with st.container():
 
 
     c1, c2 = st.columns(2)
-    check_clicked = c1.button("Payroll readiness check",  use_container_width=True, disabled=readiness_running, key="btn_check_ready")
-
-    run_disabled = payroll_running
-    run_clicked = c2.button("Run payroll",  use_container_width=True, disabled=run_disabled, key="btn_run_payroll")
-
+    check_clicked = c1.button(
+    "Payroll readiness check",
+    use_container_width=True,
+    disabled=(readiness_running or not is_valid_friday),
+    key="btn_check_ready"
+    )
+    
+    run_disabled = payroll_running or not is_valid_friday
+    run_clicked = c2.button(
+        "Run payroll",
+        use_container_width=True,
+        disabled=run_disabled,
+        key="btn_run_payroll"
+    )
     if check_clicked:
         _clear_readiness_state(users, ss.auth_user)
         users.update_one({"username": ss.auth_user}, {"$unset": {"mfa_code": ""}})
@@ -1238,6 +1247,7 @@ with st.container():
         except Exception:
             # fallback if streamlit_autorefresh isn't installed
             st.rerun()
+
 
 
 
