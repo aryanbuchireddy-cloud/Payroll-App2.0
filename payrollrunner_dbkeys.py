@@ -72,6 +72,43 @@ HEARTLAND_EMPLOYEEID_REPORT_PICK={
 # ---------- General helpers / regex ----------
 _NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
 _DEPT_HASH_RE = re.compile(r"#\s*(\d{3,6})\b", re.I)  # "#3763", "# 3812", etc.
+from datetime import date, datetime, timedelta
+
+def _is_friday(d: date) -> bool:
+    return isinstance(d, date) and d.weekday() == 4  # Friday
+
+def _next_friday(from_day: date) -> date:
+    # returns upcoming Friday (could be today if today is Friday)
+    offset = (4 - from_day.weekday()) % 7
+    return from_day + timedelta(days=offset)
+
+def _prev_friday(from_day: date) -> date:
+    # returns most recent Friday (could be today if today is Friday)
+    offset = (from_day.weekday() - 4) % 7
+    return from_day - timedelta(days=offset)
+
+def _default_payroll_friday(today: date | None = None) -> date:
+    """
+    Choose the payroll Friday default.
+    Rule: default to the most recent Friday (today if Friday).
+    """
+    t = today or date.today()
+    return _prev_friday(t)
+
+def _coerce_date(value) -> date:
+    """
+    Accepts: datetime.date, datetime.datetime, or 'MM/DD/YYYY' string.
+    Returns: datetime.date
+    """
+    if value is None:
+        raise ValueError("period_end_date is required")
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    s = str(value).strip()
+    # Expect SalonData format
+    return datetime.strptime(s, "%m/%d/%Y").date()
 
 
 # ---------- Mongo helpers ----------
@@ -394,13 +431,31 @@ def _friendly_error_message(err) -> str:
 
 
 # ---------- SalonData download ----------
-async def download_salondata_csv(page: Page, sd_user: str, sd_pass: str) -> Tuple[str, str]:
+async def download_salondata_csv(
+    page: Page,
+    sd_user: str,
+    sd_pass: str,
+    period_end_date=None,   # <-- NEW
+) -> Tuple[str, str]:
     """
-    Log into SalonData, run 'Payroll Detail - Biweekly' for the closest Friday,
+    Log into SalonData, run 'Payroll Detail - Biweekly' for a GIVEN Friday,
     and download the CSV.
+
+    period_end_date can be:
+      - datetime.date
+      - datetime.datetime
+      - string 'MM/DD/YYYY'
 
     Returns: (csv_path, period_end_str)
     """
+    # ---- enforce Friday-only ----
+    d = _coerce_date(period_end_date) if period_end_date is not None else _default_payroll_friday()
+    if not _is_friday(d):
+        raise RuntimeError(
+            f"SalonData biweekly payroll can only run for a Friday. You selected {d.strftime('%m/%d/%Y')}."
+        )
+    friday_str = d.strftime("%m/%d/%Y")
+
     print("🔐 Logging into SalonData...")
     await page.goto("https://reports.salondata.com/static/reports/index.html")
 
@@ -415,25 +470,13 @@ async def download_salondata_csv(page: Page, sd_user: str, sd_pass: str) -> Tupl
     await page.locator('#reportCategoryList').get_by_text('Accounting & Payroll').click()
     await page.locator('#reportList').get_by_text('Payroll Detail - Biweekly').click()
 
-    # Set End Date (closest Friday)
-    from datetime import date, timedelta
-    today = date.today()
-    weekday = today.weekday()  # Monday=0..Sunday=6
-    days_to_friday = 4 - weekday
-
-    if abs(days_to_friday) <= 3:
-        closest_friday = today + timedelta(days=days_to_friday)
-    else:
-        closest_friday = today - timedelta(days=(7 - abs(days_to_friday)))
-
-    friday_str = closest_friday.strftime('%m/%d/%Y')
-
     # End date input (2nd input)
     end_date_input = page.locator('input').nth(1)
     await end_date_input.click()
     await page.keyboard.press('Control+A')
     await page.keyboard.press('Backspace')
-    await page.keyboard.type(friday_str,delay=50)
+    await page.keyboard.type(friday_str, delay=50)
+
     # Select All salons
     await page.click('text=Select All')
 
@@ -2084,7 +2127,7 @@ async def upload_to_heartland(
 
 
 # ---------- Readiness check (Mongo keys, auto-sync from Heartland) ----------
-def check_payroll_ready_for_user(username: str, dry_run: bool = False) -> dict:
+def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_end_date=None) -> dict:
     """
     Readiness check:
 
@@ -2110,7 +2153,7 @@ def check_payroll_ready_for_user(username: str, dry_run: bool = False) -> dict:
                 browser = await p.chromium.launch(headless=True, slow_mo=500)
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
-                csv_path, _ = await download_salondata_csv(page, sd_user, sd_pass)
+                csv_path, _ = await download_salondata_csv(page, sd_user, sd_pass, period_end_date)
                 await browser.close()
                 return csv_path
 
@@ -2209,6 +2252,7 @@ async def _full_agentic_flow_inner(
     hl_user: str,
     hl_pass: str,
     username: str,
+    period_end_date=None,
 ) -> dict:
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, slow_mo=500)
@@ -2216,7 +2260,7 @@ async def _full_agentic_flow_inner(
         page = await context.new_page()
 
         # Download payroll CSV from SalonData
-        csv_path, period_end = await download_salondata_csv(page, sd_user, sd_pass)
+        csv_path, period_end = await download_salondata_csv(page, sd_user, sd_pass, period_end_date)
 
         # Example: Payroll_PDF_2026-01-02_owner_example_com.pdf
         # ✅ Make filename Windows-safe + deterministic (overwrites if same period_end)
@@ -2283,21 +2327,21 @@ async def _full_agentic_flow_inner(
         }
 
 
-def run_payroll_for_user(username: str) -> dict:
+def run_payroll_for_user(username: str, period_end_date=None) -> dict:
     try:
         _update_payroll_status(username, "running")
         sd_user, sd_pass = _get_vendor_creds(username, "salondata")
         hl_user, hl_pass = _get_vendor_creds(username, "heartland")
 
         # Make sure Heartland employee keys are present for this user (Mongo-based).
-        ready = check_payroll_ready_for_user(username, dry_run=False)
+       ready = check_payroll_ready_for_user(username, dry_run=False, period_end_date=period_end_date)
         if not ready.get("ready"):
             raise RuntimeError(ready.get("error") or "Payroll is not ready. Missing employee keys.")
 
         if os.name == "nt":
             asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-        result = asyncio.run(_full_agentic_flow_inner(sd_user, sd_pass, hl_user, hl_pass, username))
+        result = asyncio.run(_full_agentic_flow_inner(sd_user, sd_pass, hl_user, hl_pass, username, period_end_date=period_end_date))
         # If the inner flow returns an error payload (instead of raising), treat it as a failure.
         if isinstance(result, dict) and (result.get("error") or (result.get("ok") is False)):
             raise RuntimeError(result.get("error") or "Payroll failed.")
