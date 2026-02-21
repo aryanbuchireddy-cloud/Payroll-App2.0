@@ -132,6 +132,19 @@ ss.setdefault("readiness_thread", None)
 
 
 # ---------------- Helpers ----------------
+from datetime import date, datetime, timedelta
+
+def _is_friday(d: date) -> bool:
+    return isinstance(d, date) and d.weekday() == 4  # Friday
+
+def _prev_friday(from_day: date) -> date:
+    offset = (from_day.weekday() - 4) % 7
+    return from_day - timedelta(days=offset)
+
+def _default_payroll_friday(today: date | None = None) -> date:
+    t = today or date.today()
+    return _prev_friday(t)
+
 def _now() -> float:
     return time.time()
 
@@ -1015,7 +1028,20 @@ with st.expander("🔑 Update external passwords (SalonData / Heartland)", expan
                     st.success("✅ Heartland password updated.")
                 else:
                     st.error("Could not update Heartland password (Heartland must be configured first).")
+check_clicked = c1.button(
+    "Payroll readiness check",
+    use_container_width=True,
+    disabled=(readiness_running or not is_valid_friday),
+    key="btn_check_ready"
+)
 
+run_disabled = payroll_running or not is_valid_friday
+run_clicked = c2.button(
+    "Run payroll",
+    use_container_width=True,
+    disabled=run_disabled,
+    key="btn_run_payroll"
+)
 # ---- Actions ----
 latest_user = _mongo_get_user(users, ss.auth_user) or {}
 readiness_status = latest_user.get("readiness_status") or {}
@@ -1211,6 +1237,7 @@ with st.container():
         except Exception:
             # fallback if streamlit_autorefresh isn't installed
             st.rerun()
+
 
 
 
