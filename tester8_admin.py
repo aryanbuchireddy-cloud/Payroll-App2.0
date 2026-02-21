@@ -513,7 +513,7 @@ def _start_readiness_thread(users_col, username: str, period_end_date):
         try:
             _set_readiness_status(users_col, username, "running", error=None, missing_keys=[], csv_path=None, needs_sync=None)
 
-            pre = _safe_check_payroll_ready(username, dry_run=True)
+            pre = check_payroll_ready_for_user(username, dry_run=True, period_end_date=period_end_date)
 
             if pre.get("ready") and not (pre.get("mis							sing_keys") or []):
                 _set_readiness_status(
@@ -1247,6 +1247,7 @@ with st.container():
         except Exception:
             # fallback if streamlit_autorefresh isn't installed
             st.rerun()
+
 
 
 
