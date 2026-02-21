@@ -535,7 +535,7 @@ def _start_readiness_thread(users_col, username: str, period_end_date):
             # Clear MFA right before the real sync starts
             users_col.update_one({"username": _norm_username(username)}, {"$unset": {"mfa_code": ""}})
 
-            full = _safe_check_payroll_ready(username, dry_run=False)
+            full = check_payroll_ready_for_user(username, dry_run=False, period_end_date=period_end_date)
 
             if full.get("ready") and not (full.get("missing_keys") or []):
                 _set_readiness_status(
@@ -1247,6 +1247,7 @@ with st.container():
         except Exception:
             # fallback if streamlit_autorefresh isn't installed
             st.rerun()
+
 
 
 
