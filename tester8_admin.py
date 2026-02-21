@@ -501,7 +501,7 @@ def _clear_readiness_state(users_col=None, username: str | None = None):
         users_col.update_one({"username": _norm_username(username)}, {"$unset": {"readiness_status": ""}})
 
 
-def _start_readiness_thread(users_col, username: str):
+def _start_readiness_thread(users_col, username: str, period_end_date):
     """
     Background worker writes ONLY to Mongo.
     Phase 1: dry_run=True
@@ -1247,6 +1247,7 @@ with st.container():
         except Exception:
             # fallback if streamlit_autorefresh isn't installed
             st.rerun()
+
 
 
 
