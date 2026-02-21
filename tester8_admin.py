@@ -1083,7 +1083,7 @@ with st.container():
     if check_clicked:
         _clear_readiness_state(users, ss.auth_user)
         users.update_one({"username": ss.auth_user}, {"$unset": {"mfa_code": ""}})
-        _start_readiness_thread(users, ss.auth_user)
+        __start_readiness_thread(users, ss.auth_user, selected_payroll_date)
         st.toast("Checking payroll readiness…", icon="🔍")
 
         # Poll Mongo briefly so READY/NOT READY can appear without an auto-rerun (prevents UI flicker/duplication).
@@ -1247,6 +1247,7 @@ with st.container():
         except Exception:
             # fallback if streamlit_autorefresh isn't installed
             st.rerun()
+
 
 
 
