@@ -2334,7 +2334,7 @@ def run_payroll_for_user(username: str, period_end_date=None) -> dict:
         hl_user, hl_pass = _get_vendor_creds(username, "heartland")
 
         # Make sure Heartland employee keys are present for this user (Mongo-based).
-       ready = check_payroll_ready_for_user(username, dry_run=False, period_end_date=period_end_date)
+        ready = check_payroll_ready_for_user(username, dry_run=False, period_end_date=period_end_date)
         if not ready.get("ready"):
             raise RuntimeError(ready.get("error") or "Payroll is not ready. Missing employee keys.")
 
