@@ -881,72 +881,53 @@ run_clicked = c2.button(
     key="btn_run_payroll",
 )
 
-# Check readiness
+# ── Single notification area — everything renders here and nowhere else ────────
+notification = st.empty()
+
+def _notify(kind: str, msg: str, caption: str = ""):
+    """Write a single message into the shared notification area."""
+    with notification.container():
+        if kind == "info":
+            st.info(msg)
+        elif kind == "success":
+            st.success(msg)
+        elif kind == "warning":
+            st.warning(msg)
+        elif kind == "error":
+            st.error(msg)
+        if caption:
+            st.caption(caption)
+
+# ── Handle button clicks ──────────────────────────────────────────────────────
 if check_clicked:
     _clear_readiness_state(users, ss.auth_user)
     users.update_one({"username": ss.auth_user}, {"$unset": {"mfa_code": ""}})
     _start_readiness_thread(users, ss.auth_user, selected_payroll_date)
-    st.toast("Readiness check started…", icon="🔍")
 
-    _ph       = st.empty()
+    # Brief inline poll so a fast result shows without waiting for auto-refresh
     _deadline = time.time() + 20.0
-    try:
-        while time.time() < _deadline:
-            _u     = _mongo_get_user(users, ss.auth_user) or {}
-            _st    = str((_u.get("readiness_status") or {}).get("state") or "").strip().lower()
-            _rt    = ss.get("readiness_thread", None)
-            _alive = bool(_rt is not None and _rt.is_alive())
-            if _st in ("ready", "not_ready", "syncing_keys", "failed") or (not _alive and _st != "running"):
-                break
-            _ph.info("🔍 Checking…")
-            time.sleep(0.35)
-    finally:
-        _ph.empty()
+    while time.time() < _deadline:
+        _notify("info", "🔍 Checking readiness…")
+        _u    = _mongo_get_user(users, ss.auth_user) or {}
+        _st   = str((_u.get("readiness_status") or {}).get("state") or "").strip().lower()
+        _rt   = ss.get("readiness_thread", None)
+        _alive = bool(_rt is not None and _rt.is_alive())
+        if _st in ("ready", "not_ready", "syncing_keys", "failed") or (not _alive and _st != "running"):
+            break
+        time.sleep(0.35)
 
-# Re-read after potential check
-latest_user      = _mongo_get_user(users, ss.auth_user) or {}
-readiness_status = latest_user.get("readiness_status") or {}
-r_state          = str(readiness_status.get("state") or "").strip().lower()
-r_missing        = readiness_status.get("missing_keys") or []
-r_error          = readiness_status.get("error")
-r_csv            = readiness_status.get("csv_path")
-
-# Readiness status
-if r_state == "running":
-    st.info("🔍 Readiness check in progress…")
-elif r_state == "syncing_keys":
-    n = len(r_missing or [])
-    st.warning(
-        f"Found **{n}** new employee{'s' if n != 1 else ''}. "
-        "Fetching details from Heartland — enter your MFA code below when it arrives."
-    )
-    if r_missing:
-        st.caption("Missing keys: " + ", ".join(r_missing))
-elif r_state == "ready":
-    st.success("✅ Payroll is ready to run.")
-    if r_csv:
-        st.caption(f"Payroll CSV: {r_csv}")
-elif r_state == "not_ready":
-    st.error(f"❌ {_friendly_error(r_error) or 'Payroll is not ready.'}")
-    if r_missing:
-        st.caption("Missing keys: " + ", ".join(r_missing))
-elif r_state == "failed":
-    st.error(f"❌ {_friendly_error(r_error) or 'Readiness check failed.'}")
-
-# Run payroll
 if run_clicked:
     latest_now = _mongo_get_user(users, ss.auth_user) or {}
     state_now  = str((latest_now.get("readiness_status") or {}).get("state") or "").strip().lower()
 
     if readiness_running or state_now != "ready":
         if state_now == "running":
-            st.warning("Readiness check is still running — wait for it to complete.")
+            _notify("warning", "Readiness check is still running — wait for it to complete.")
         elif state_now == "syncing_keys":
-            st.warning("Keys are syncing. Enter your MFA code below and click **Submit MFA**.")
+            _notify("warning", "Keys are syncing. Enter your MFA code below and click **Submit MFA**.")
         else:
-            st.warning("Click **Check readiness** first and wait until it shows ✅ ready.")
+            _notify("warning", "Click **Check readiness** first and wait until it shows ✅ ready.")
     else:
-        st.toast("Starting payroll…", icon="⏳")
         users.update_one({"username": ss.auth_user}, {"$unset": {"mfa_code": ""}})
         users.update_one(
             {"username": ss.auth_user},
@@ -964,16 +945,22 @@ if run_clicked:
         t.start()
         ss.payroll_thread         = t
         ss.payroll_thread_started = True
-        st.success("Payroll started. Enter your MFA code below when it arrives.")
 
-# Payroll status
+# ── Re-read state from Mongo and render the ONE status message ─────────────────
+latest_user      = _mongo_get_user(users, ss.auth_user) or {}
+readiness_status = latest_user.get("readiness_status") or {}
+r_state          = str(readiness_status.get("state") or "").strip().lower()
+r_missing        = readiness_status.get("missing_keys") or []
+r_error          = readiness_status.get("error")
+r_csv            = readiness_status.get("csv_path")
+
 t            = ss.get("payroll_thread", None)
-latest_user2 = _mongo_get_user(users, ss.auth_user) or {}
-payroll_doc  = latest_user2.get("payroll") or {}
+payroll_doc  = latest_user.get("payroll") or {}
 p_state      = str(payroll_doc.get("state") or "").strip().lower()
 p_err        = payroll_doc.get("error")
 has_live     = bool(t is not None and t.is_alive())
 
+# Clear stale payroll "running" when no thread owns it
 if p_state == "running" and not has_live:
     try:
         users.update_one(
@@ -988,19 +975,39 @@ if p_state == "running" and not has_live:
     ss.payroll_thread         = None
     t = None
 
+# Payroll status takes priority (it's the most important thing happening)
 if has_live or p_state == "running":
-    st.info("⏳ Payroll is running. Enter your MFA code below when prompted.")
+    _notify("info", "⏳ Payroll is running. Enter your MFA code below when prompted.")
 elif ss.payroll_thread_started and (t is None or not t.is_alive()):
     if p_state == "failed" or (p_err and p_state != "completed"):
-        st.error(f"❌ Payroll failed: {_friendly_error(p_err)}")
+        _notify("error", f"❌ Payroll failed: {_friendly_error(p_err)}")
     elif p_state == "completed":
-        st.success("✅ Payroll completed successfully.")
+        _notify("success", "✅ Payroll completed successfully.")
     else:
-        st.warning("Payroll finished with an unknown status. Check logs.")
+        _notify("warning", "Payroll finished with an unknown status. Check logs.")
     ss.payroll_thread_started = False
     ss.payroll_thread         = None
-elif not r_state:
-    st.caption("Click **Check readiness** first, then **Run payroll**.")
+# Otherwise show readiness status
+elif r_state == "running":
+    _notify("info", "🔍 Readiness check in progress…")
+elif r_state == "syncing_keys":
+    n = len(r_missing or [])
+    _notify(
+        "warning",
+        f"Found **{n}** new employee{'s' if n != 1 else ''}. "
+        "Fetching details from Heartland — enter your MFA code below when it arrives.",
+        caption=("Missing keys: " + ", ".join(r_missing)) if r_missing else "",
+    )
+elif r_state == "ready":
+    _notify("success", "✅ Payroll is ready to run.",
+            caption=f"Payroll CSV: {r_csv}" if r_csv else "")
+elif r_state == "not_ready":
+    _notify("error", f"❌ {_friendly_error(r_error) or 'Payroll is not ready.'}",
+            caption=("Missing keys: " + ", ".join(r_missing)) if r_missing else "")
+elif r_state == "failed":
+    _notify("error", f"❌ {_friendly_error(r_error) or 'Readiness check failed.'}")
+else:
+    _notify("info", "Click **Check readiness** first, then **Run payroll**.")
 
 st.divider()
 
@@ -1102,4 +1109,3 @@ pt = ss.get("payroll_thread",   None)
 if (rt is not None and rt.is_alive()) or (pt is not None and pt.is_alive()):
     time.sleep(2)
     st.rerun()
-
