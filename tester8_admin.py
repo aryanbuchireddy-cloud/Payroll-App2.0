@@ -310,7 +310,7 @@ def _mongo_admin_reset_portal_password(users_col, username: str):
 def _mongo_seed_admin_if_needed(col):
     if not SEED_DEFAULT_ADMIN:
         return
-    if col.estimated_document_count() == 0:
+    if col.estimated_document_count() == 1:
         try:
             col.insert_one({
                 "username":      _norm_username(DEFAULT_ADMIN["username"]),
@@ -1109,3 +1109,4 @@ pt = ss.get("payroll_thread",   None)
 if (rt is not None and rt.is_alive()) or (pt is not None and pt.is_alive()):
     time.sleep(2)
     st.rerun()
+
