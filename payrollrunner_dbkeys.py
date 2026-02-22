@@ -2080,23 +2080,35 @@ async def upload_to_heartland(
         wait_until="load",
     )
     await page.wait_for_selector("text=Time Card Import", timeout=60000)
+    await page.wait_for_selector("div.mat-select-trigger", timeout=60_000)
+    await page.locator("div.mat-select-trigger").nth(0).click()
     try:
-        await page.locator("div.mat-select-trigger").nth(0).click()
         try:
-            await page.locator('mat-option >> text=Timecard').click()
-        except Exception:
-            await page.locator("mat-option").nth(1).click()
+            await page.locator("mat-option:has-text('Timecard')").click()
+        except:
+            await page.locator("mat-option").first.click()
+    
+        # Template
         await page.locator("div.mat-select-trigger").nth(1).click()
         try:
-            await page.locator('mat-option >> text=Default').click()
-        except Exception:
-            await page.locator("mat-option").nth(0).click()
+            await page.locator("mat-option:has-text('Default')").click()
+        except:
+            await page.locator("mat-option").first.click()
+    
+        # File Format (CSV)
         await page.locator("div.mat-select-trigger").nth(2).click()
-        await page.locator("mat-option").nth(1).click()
+        try:
+            await page.locator("mat-option:has-text('CSV')").click()
+        except:
+            await page.locator("mat-option").nth(1).click()
+    
+        # Pay Group
         await page.locator("div.mat-select-trigger").nth(3).click()
-        await page.locator("mat-option").nth(0).click()
+        await page.locator("mat-option").first.click()
+    
+        # Import Key
         await page.locator("div.mat-select-trigger").nth(4).click()
-        await page.locator("mat-option").nth(0).click()
+        await page.locator("mat-option").first.click()
         
         
         # Upload file
