@@ -310,7 +310,7 @@ def _mongo_admin_reset_portal_password(users_col, username: str):
 def _mongo_seed_admin_if_needed(col):
     if not SEED_DEFAULT_ADMIN:
         return
-    if col.estimated_document_count() == 1:
+    if col.estimated_document_count() == 0:
         try:
             col.insert_one({
                 "username":      _norm_username(DEFAULT_ADMIN["username"]),
@@ -798,50 +798,47 @@ if options:
     download_name      = selected.get("filename") or (os.path.basename(selected_path) if selected_path else "Payroll_Report.pdf")
     sel_key            = str(selected_gridfs_id or selected_path or download_name or "")
 
-    def _fetch_pdf_bytes():
-        if selected_gridfs_id:
-            try:
-                fs       = gridfs.GridFS(mongo_client_pdf[_MONGO_DBNAME], collection="payroll_pdfs")
-                grid_out = fs.get(ObjectId(str(selected_gridfs_id)))
-                return grid_out.read(), f"GridFS ({selected_gridfs_id})"
-            except Exception as e:
-                return None, f"GridFS error: {e}"
-        if selected_path and os.path.exists(selected_path):
-            try:
-                with open(selected_path, "rb") as f:
-                    return f.read(), f"Local file ({selected_path})"
-            except Exception as e:
-                return None, f"File error: {e}"
-        return None, "No source available."
+    # Auto-fetch bytes whenever the selection changes (cached in session state)
+    cache = st.session_state.get("__pdf_cache") or {}
+    if cache.get("sel_key") != sel_key:
+        with st.spinner("Loading PDF…"):
+            pdf_bytes  = None
+            source_msg = ""
+            if selected_gridfs_id:
+                try:
+                    fs       = gridfs.GridFS(mongo_client_pdf[_MONGO_DBNAME], collection="payroll_pdfs")
+                    grid_out = fs.get(ObjectId(str(selected_gridfs_id)))
+                    pdf_bytes  = grid_out.read()
+                    source_msg = f"GridFS ({selected_gridfs_id})"
+                except Exception as e:
+                    source_msg = f"GridFS error: {e}"
+            elif selected_path and os.path.exists(selected_path):
+                try:
+                    with open(selected_path, "rb") as f:
+                        pdf_bytes = f.read()
+                    source_msg = f"Local file ({selected_path})"
+                except Exception as e:
+                    source_msg = f"File error: {e}"
+            else:
+                source_msg = "No source available."
 
-    col_a, col_b = st.columns([1, 3])
-    with col_a:
-        if st.button("Load PDF", key="load_pdf_btn", use_container_width=True):
-            with st.spinner("Loading…"):
-                pdf_bytes, source_msg = _fetch_pdf_bytes()
-            st.session_state["__pdf_cache"] = {
-                "sel_key": sel_key, "bytes": pdf_bytes,
-                "download_name": download_name, "source_msg": source_msg,
-            }
+        st.session_state["__pdf_cache"] = {
+            "sel_key": sel_key, "bytes": pdf_bytes,
+            "download_name": download_name, "source_msg": source_msg,
+        }
+        cache = st.session_state["__pdf_cache"]
 
-    cache       = st.session_state.get("__pdf_cache") or {}
-    cache_bytes = cache.get("bytes")      if cache.get("sel_key") == sel_key else None
-    cache_src   = cache.get("source_msg") if cache.get("sel_key") == sel_key else None
-
-    if cache_src:
-        st.caption(f"Source: {cache_src}")
-
-    if cache_bytes:
+    pdf_bytes = cache.get("bytes")
+    if pdf_bytes:
         st.download_button(
             label="⬇️ Download PDF",
-            data=cache_bytes,
+            data=pdf_bytes,
             file_name=download_name,
             mime="application/pdf",
             use_container_width=True,
         )
     else:
-        with col_b:
-            st.caption("Click **Load PDF** to enable download.")
+        st.error(f"Could not load PDF. {cache.get('source_msg', '')}")
 else:
     st.info("No PDFs yet. Run payroll to generate one.")
 
