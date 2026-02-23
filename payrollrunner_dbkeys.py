@@ -2080,35 +2080,48 @@ async def upload_to_heartland(
         wait_until="load",
     )
     await page.wait_for_selector("text=Time Card Import", timeout=60000)
-    await page.wait_for_selector("div.mat-select-trigger", timeout=60_000)
-    await page.locator("div.mat-select-trigger").nth(0).click()
     try:
-        try:
-            await page.locator("mat-option:has-text('Timecard')").click()
-        except:
-            await page.locator("mat-option").first.click()
-    
-        # Template
-        await page.locator("div.mat-select-trigger").nth(1).click()
-        try:
-            await page.locator("mat-option:has-text('Default')").click()
-        except:
-            await page.locator("mat-option").first.click()
-    
-        # File Format (CSV)
-        await page.locator("div.mat-select-trigger").nth(2).click()
-        try:
-            await page.locator("mat-option:has-text('CSV')").click()
-        except:
-            await page.locator("mat-option").nth(1).click()
-    
-        # Pay Group
-        await page.locator("div.mat-select-trigger").nth(3).click()
-        await page.locator("mat-option").first.click()
-    
-        # Import Key
-        await page.locator("div.mat-select-trigger").nth(4).click()
-        await page.locator("mat-option").first.click()
+        # --- after you land on the page and locate the form ---
+        form = page.locator("text=Import Options").locator("xpath=ancestor::form[1]")
+        if await form.count() == 0:
+            form = page.locator("form").first
+        
+        selects = form.locator("mat-select")
+        await selects.nth(0).wait_for(state="visible", timeout=120_000)
+        
+        def enabled_options():
+            # avoid disabled options if Heartland shows any
+            return page.locator("mat-option:not([aria-disabled='true'])")
+        
+        # -----------------------
+        # Import Type: 2nd option
+        await selects.nth(0).click()
+        await enabled_options().first.wait_for(state="visible", timeout=120_000)
+        await enabled_options().nth(1).click()
+        
+        # -----------------------
+        # Template: 1st option
+        await selects.nth(1).click()
+        await enabled_options().first.wait_for(state="visible", timeout=120_000)
+        await enabled_options().nth(0).click()
+        
+        # -----------------------
+        # File Format: 2nd option
+        await selects.nth(2).click()
+        await enabled_options().first.wait_for(state="visible", timeout=120_000)
+        await enabled_options().nth(1).click()
+        
+        # -----------------------
+        # Default Pay Group: 1st option
+        await selects.nth(3).click()
+        await enabled_options().first.wait_for(state="visible", timeout=120_000)
+        await enabled_options().nth(0).click()
+        
+        # -----------------------
+        # Import Key: 1st option
+        await selects.nth(4).click()
+        await enabled_options().first.wait_for(state="visible", timeout=120_000)
+        await enabled_options().nth(0).click()
         
         
         # Upload file
@@ -2118,10 +2131,9 @@ async def upload_to_heartland(
         print("📝 Submitting form with Validate...")
         await page.locator('button:has-text("Validate")').click()
         print("⏳ Waiting for Import button...")
-        await page.wait_for_selector('button:has-text("Import")', timeout=60000)
         await asyncio.sleep(2)
+        await page.wait_for_selector('button:has-text("Import")', timeout=60000)
         print("🚀 Clicking Import...")
-        await page.locator('button:has-text("Import")').nth(1).click()
         
     except Exception as e:
         raise RuntimeError(f"Failed to attach file: {e}")
