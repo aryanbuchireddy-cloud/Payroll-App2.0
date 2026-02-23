@@ -2095,30 +2095,35 @@ async def upload_to_heartland(
         
         # -----------------------
         # Import Type: 2nd option
+        print("hi")
         await selects.nth(0).click()
         await enabled_options().first.wait_for(state="visible", timeout=120_000)
         await enabled_options().nth(1).click()
         
         # -----------------------
         # Template: 1st option
+        print("hi1")
         await selects.nth(1).click()
         await enabled_options().first.wait_for(state="visible", timeout=120_000)
         await enabled_options().nth(0).click()
         
         # -----------------------
         # File Format: 2nd option
+        print("hi2")
         await selects.nth(2).click()
         await enabled_options().first.wait_for(state="visible", timeout=120_000)
         await enabled_options().nth(1).click()
         
         # -----------------------
         # Default Pay Group: 1st option
+        print("hi3")
         await selects.nth(3).click()
         await enabled_options().first.wait_for(state="visible", timeout=120_000)
         await enabled_options().nth(0).click()
         
         # -----------------------
         # Import Key: 1st option
+        print("hi4")
         await selects.nth(4).click()
         await enabled_options().first.wait_for(state="visible", timeout=120_000)
         await enabled_options().nth(0).click()
