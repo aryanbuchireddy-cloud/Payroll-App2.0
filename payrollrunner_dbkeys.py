@@ -2073,86 +2073,108 @@ async def upload_to_heartland(
     username: str,
 ) -> None:
     """Log into Heartland and upload the given CSV file to Time Card Import."""
+    import re
+
+    async def select_dropdown(label_text: str, option_text: str = None, option_index: int = 0):
+        field = page.locator("mat-form-field").filter(
+            has_text=re.compile(label_text, re.I)
+        ).first
+
+        await field.wait_for(state="visible", timeout=30000)
+
+        # Auris/MDC-compatible trigger
+        trigger = field.locator(".mat-mdc-select-trigger, .mat-select-trigger").first
+        await trigger.scroll_into_view_if_needed()
+        await trigger.click(force=True)
+
+        # Wait for dropdown overlay options
+        options = page.locator(".cdk-overlay-pane mat-option, .cdk-overlay-pane .mat-mdc-option")
+        await options.first.wait_for(state="visible", timeout=10000)
+
+        if option_text:
+            # exact match first
+            option = options.filter(
+                has_text=re.compile(rf"^\s*{re.escape(option_text)}\s*$", re.I)
+            ).first
+            try:
+                await option.wait_for(state="visible", timeout=3000)
+            except Exception:
+                # contains fallback
+                option = options.filter(
+                    has_text=re.compile(re.escape(option_text), re.I)
+                ).first
+                try:
+                    await option.wait_for(state="visible", timeout=3000)
+                except Exception:
+                    # final fallback: first enabled option
+                    option = page.locator(
+                        ".cdk-overlay-pane mat-option:not([aria-disabled='true']), "
+                        ".cdk-overlay-pane .mat-mdc-option[aria-disabled='false']"
+                    ).nth(option_index)
+        else:
+            option = page.locator(
+                ".cdk-overlay-pane mat-option:not([aria-disabled='true']), "
+                ".cdk-overlay-pane .mat-mdc-option[aria-disabled='false']"
+            ).nth(option_index)
+
+        await option.click(force=True)
+        await page.wait_for_timeout(500)
+
+    # Reuse your existing login flow
     await _heartland_login(page, hl_user, hl_pass, username)
 
+    # Open Time Card Import
     await page.goto(
         "https://www.heartlandpayroll.com/Payroll/PayrollTimeCardImport/NewTimeCardImport",
-        wait_until="load",
+        wait_until="domcontentloaded",
     )
-    await page.wait_for_selector("text=Time Card Import", timeout=60000)
+
+    await page.wait_for_selector("text=New Time Card Import", timeout=60000)
+    await page.wait_for_selector("mat-form-field", timeout=60000)
+    print("✅ Time Card Import page loaded.")
+
     try:
-        # --- after you land on the page and locate the form ---
-        form = page.locator("text=Import Options").locator("xpath=ancestor::form[1]")
-        if await form.count() == 0:
-            form = page.locator("form").first
-        
-        selects = form.locator("mat-select")
-        await selects.nth(0).wait_for(state="visible", timeout=120_000)
-        
-        def enabled_options():
-            # avoid disabled options if Heartland shows any
-            return page.locator("mat-option:not([aria-disabled='true'])")
-        
-        # -----------------------
-        # Import Type: 2nd option
-        print("hi")
-        await selects.nth(0).click()
-        await enabled_options().first.wait_for(state="visible", timeout=120_000)
-        await enabled_options().nth(1).click()
-        
-        # -----------------------
-        # Template: 1st option
-        print("hi1")
-        await selects.nth(1).click()
-        await enabled_options().first.wait_for(state="visible", timeout=120_000)
-        await enabled_options().nth(0).click()
-        
-        # -----------------------
-        # File Format: 2nd option
-        print("hi2")
-        await selects.nth(2).click()
-        await enabled_options().first.wait_for(state="visible", timeout=120_000)
-        await enabled_options().nth(1).click()
-        
-        # -----------------------
-        # Default Pay Group: 1st option
-        print("hi3")
-        await selects.nth(3).click()
-        await enabled_options().first.wait_for(state="visible", timeout=120_000)
-        await enabled_options().nth(0).click()
-        
-        # -----------------------
-        # Import Key: 1st option
-        print("hi4")
-        await selects.nth(4).click()
-        await enabled_options().first.wait_for(state="visible", timeout=120_000)
-        await enabled_options().nth(0).click()
-        
-        
+        # Dropdowns by label instead of nth(index)
+        print("🔽 Import Type: Timecard")
+        await select_dropdown(r"Import\s*Type", "Timecard")
+
+        print("🔽 Template: Default")
+        await select_dropdown(r"Template", "Default")
+
+        print("🔽 File Format: CSV")
+        await select_dropdown(r"File\s*Format", "CSV")
+
+        print("🔽 Default Pay Group")
+        await select_dropdown(r"Default\s*Pay\s*Group", option_text=None, option_index=0)
+
+        print("🔽 Import Key")
+        await select_dropdown(r"Import\s*Key", option_text=None, option_index=0)
+
         # Upload file
         print("📁 Uploading CSV file...")
         await page.set_input_files('input[type="file"]', file_path)
-        await asyncio.sleep(3)
-        print("📝 Submitting form with Validate...")
-        await page.locator('button:has-text("Validate")').click()
-        print("⏳ Waiting for Import button...")
         await asyncio.sleep(2)
-        await page.wait_for_selector('button:has-text("Import")', timeout=60000)
+
+        # Validate
+        print("📝 Submitting form with Validate...")
+        await page.get_by_role("button", name=re.compile(r"^Validate$", re.I)).click()
+
+        print("⏳ Waiting for Import button...")
+        import_btn = page.get_by_role("button", name=re.compile(r"^Import$", re.I)).first
+        await import_btn.wait_for(state="visible", timeout=60000)
+
         print("🚀 Clicking Import...")
-        
+        await import_btn.click()
+
+        # Exact success text
+        print("⏳ Waiting for confirmation of successful import...")
+        success_msg = page.get_by_text("File Successfully Imported!", exact=False).first
+        await success_msg.wait_for(state="visible", timeout=60000)
+
+        print("✅ File import confirmed as successful.")
+
     except Exception as e:
-        raise RuntimeError(f"Failed to attach file: {e}")
-
-    # Click Import/Submit
-    try:
-        await page.click("button:has-text('Import')")
-    except Exception:
-        try:
-            await page.click("button:has-text('Submit')")
-        except Exception:
-            pass
-
-    print("✅ Upload attempted. Verify in Heartland UI if needed.")
+        raise RuntimeError(f"Time Card Import failed: {e}")
 
 
 # ---------- Readiness check (Mongo keys, auto-sync from Heartland) ----------
