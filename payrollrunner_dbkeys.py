@@ -2142,7 +2142,7 @@ async def upload_to_heartland(
         await select_dropdown(r"Template", "Default")
 
         print("🔽 File Format: CSV")
-        await select_dropdown(r"File\s*Format", "CSV")
+        await select_dropdown(r"File\s*Format", "Comma Delimited File")
 
         print("🔽 Default Pay Group")
         await select_dropdown(r"Default\s*Pay\s*Group", option_text=None, option_index=0)
