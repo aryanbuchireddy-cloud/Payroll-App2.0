@@ -2079,69 +2079,102 @@ async def upload_to_heartland(
         field = page.locator("mat-form-field").filter(
             has_text=re.compile(label_text, re.I)
         ).first
+        await field.wait_for(state="visible", timeout=60000)
 
-        await field.wait_for(state="visible", timeout=30000)
-
-        # Auris/MDC-compatible trigger
-        trigger = field.locator(".mat-mdc-select-trigger, .mat-select-trigger").first
+        trigger = field.locator(".mat-mdc-select-trigger, .mat-select-trigger, mat-select").first
         await trigger.scroll_into_view_if_needed()
-        await trigger.click(force=True)
+        await page.wait_for_timeout(500)
 
-        # Wait for dropdown overlay options
-        options = page.locator(".cdk-overlay-pane mat-option, .cdk-overlay-pane .mat-mdc-option")
-        await options.first.wait_for(state="visible", timeout=10000)
+        overlay_options = page.locator(
+            ".cdk-overlay-pane mat-option, "
+            ".cdk-overlay-pane .mat-mdc-option, "
+            ".cdk-overlay-container mat-option, "
+            ".cdk-overlay-container .mat-mdc-option, "
+            "[role='option']"
+        )
+
+        opened = False
+        open_attempts = [
+            lambda: trigger.click(force=True),
+            lambda: field.click(force=True),
+            lambda: trigger.press("Enter"),
+            lambda: trigger.press(" "),
+        ]
+
+        last_err = None
+        for attempt in open_attempts:
+            try:
+                await attempt()
+                await page.wait_for_timeout(1200)
+
+                if await overlay_options.count() > 0:
+                    opened = True
+                    break
+            except Exception as e:
+                last_err = e
+
+        if not opened:
+            raise RuntimeError(
+                f"Could not open dropdown for '{label_text}'. "
+                f"URL={page.url}. Last error={last_err}"
+            )
 
         if option_text:
             # exact match first
-            option = options.filter(
+            option = overlay_options.filter(
                 has_text=re.compile(rf"^\s*{re.escape(option_text)}\s*$", re.I)
             ).first
-            try:
-                await option.wait_for(state="visible", timeout=3000)
-            except Exception:
+
+            if await option.count() == 0:
                 # contains fallback
-                option = options.filter(
+                option = overlay_options.filter(
                     has_text=re.compile(re.escape(option_text), re.I)
                 ).first
-                try:
-                    await option.wait_for(state="visible", timeout=3000)
-                except Exception:
-                    # final fallback: first enabled option
-                    option = page.locator(
-                        ".cdk-overlay-pane mat-option:not([aria-disabled='true']), "
-                        ".cdk-overlay-pane .mat-mdc-option[aria-disabled='false']"
-                    ).nth(option_index)
+
+            if await option.count() == 0:
+                # last fallback = first enabled option
+                option = page.locator(
+                    ".cdk-overlay-pane mat-option:not([aria-disabled='true']), "
+                    ".cdk-overlay-pane .mat-mdc-option[aria-disabled='false'], "
+                    "[role='option']"
+                ).nth(option_index)
         else:
             option = page.locator(
                 ".cdk-overlay-pane mat-option:not([aria-disabled='true']), "
-                ".cdk-overlay-pane .mat-mdc-option[aria-disabled='false']"
+                ".cdk-overlay-pane .mat-mdc-option[aria-disabled='false'], "
+                "[role='option']"
             ).nth(option_index)
 
+        await option.wait_for(state="visible", timeout=20000)
+        await option.scroll_into_view_if_needed()
         await option.click(force=True)
-        await page.wait_for_timeout(500)
+        await page.wait_for_timeout(800)
 
-    # Reuse your existing login flow
     await _heartland_login(page, hl_user, hl_pass, username)
 
-    # Open Time Card Import
     await page.goto(
         "https://www.heartlandpayroll.com/Payroll/PayrollTimeCardImport/NewTimeCardImport",
         wait_until="domcontentloaded",
     )
+    await page.wait_for_load_state("networkidle")
+    await page.wait_for_timeout(2000)
 
-    await page.wait_for_selector("text=New Time Card Import", timeout=60000)
+    try:
+        await page.wait_for_selector("text=New Time Card Import", timeout=60000)
+    except Exception:
+        await page.wait_for_selector("text=Time Card Import", timeout=60000)
+
     await page.wait_for_selector("mat-form-field", timeout=60000)
     print("✅ Time Card Import page loaded.")
 
     try:
-        # Dropdowns by label instead of nth(index)
         print("🔽 Import Type: Timecard")
         await select_dropdown(r"Import\s*Type", "Timecard")
 
         print("🔽 Template: Default")
         await select_dropdown(r"Template", "Default")
 
-        print("🔽 File Format: CSV")
+        print("🔽 File Format: Comma Delimited File")
         await select_dropdown(r"File\s*Format", "Comma Delimited File")
 
         print("🔽 Default Pay Group")
@@ -2150,12 +2183,10 @@ async def upload_to_heartland(
         print("🔽 Import Key")
         await select_dropdown(r"Import\s*Key", option_text=None, option_index=0)
 
-        # Upload file
         print("📁 Uploading CSV file...")
         await page.set_input_files('input[type="file"]', file_path)
-        await asyncio.sleep(2)
+        await page.wait_for_timeout(2500)
 
-        # Validate
         print("📝 Submitting form with Validate...")
         await page.get_by_role("button", name=re.compile(r"^Validate$", re.I)).click()
 
@@ -2166,7 +2197,6 @@ async def upload_to_heartland(
         print("🚀 Clicking Import...")
         await import_btn.click()
 
-        # Exact success text
         print("⏳ Waiting for confirmation of successful import...")
         success_msg = page.get_by_text("File Successfully Imported!", exact=False).first
         await success_msg.wait_for(state="visible", timeout=60000)
