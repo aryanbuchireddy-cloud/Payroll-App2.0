@@ -523,74 +523,119 @@ if not ss.auth_user:
 <meta charset="utf-8"/>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: "Source Sans Pro", sans-serif; background: transparent; }
-  .card {
-    background: #1e2130; border: 1px solid #31364b; border-radius: 10px;
-    padding: 28px 32px 24px; width: 100%;
+  html, body { background: transparent; }
+  body {
+    font-family: "Source Sans Pro", -apple-system, sans-serif;
+    padding: 4px 2px 8px;
+    color: #fafafa;
   }
-  h2 { color: #fafafa; font-size: 1.25rem; margin-bottom: 18px; }
-  label { display:block; color:#b0b8cc; font-size:0.82rem; margin: 12px 0 4px; }
+  label {
+    display: block;
+    font-size: 0.875rem;
+    color: #fafafa;
+    margin: 16px 0 6px;
+    font-weight: 400;
+  }
+  label:first-of-type { margin-top: 0; }
   input {
-    width:100%; padding:9px 12px; background:#0e1117;
-    border:1px solid #31364b; border-radius:6px;
-    color:#fafafa; font-size:0.95rem; outline:none;
+    width: 100%;
+    padding: 8px 12px;
+    background: transparent;
+    border: 1px solid rgba(250,250,250,0.2);
+    border-radius: 6px;
+    color: #fafafa;
+    font-size: 0.95rem;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
   }
-  input:focus { border-color:#ff4b4b; }
-  .err { color:#ff4b4b; font-size:0.82rem; margin-top:8px; min-height:18px; }
+  input:focus {
+    border-color: #ff4b4b;
+    box-shadow: 0 0 0 2px rgba(255,75,75,0.25);
+  }
+  input::placeholder { color: rgba(250,250,250,0.35); }
+  .err {
+    color: #ff4b4b;
+    font-size: 0.82rem;
+    margin-top: 10px;
+    min-height: 18px;
+    padding: 6px 10px;
+    background: rgba(255,75,75,0.12);
+    border-radius: 4px;
+    display: none;
+  }
+  .err.visible { display: block; }
   button {
-    margin-top:18px; width:100%; padding:10px;
-    background:#ff4b4b; color:white; border:none;
-    border-radius:6px; font-size:1rem; font-weight:600; cursor:pointer;
+    margin-top: 18px;
+    width: 100%;
+    padding: 10px;
+    background: #ff4b4b;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+    letter-spacing: 0.01em;
   }
-  button:hover { background:#e03c3c; }
-  button:disabled { opacity:0.6; cursor:default; }
+  button:hover:not(:disabled) { background: #e03c3c; }
+  button:disabled { opacity: 0.55; cursor: default; }
 </style>
 </head>
 <body>
-<div class="card">
-  <h2>Sign in</h2>
-  <form id="f" method="post" action="#">
-    <label for="u">Username</label>
-    <input id="u" name="username" type="email"
-           autocomplete="username"
-           placeholder="you@example.com" required autofocus />
-    <label for="p">Password</label>
-    <input id="p" name="password" type="password"
-           autocomplete="current-password"
-           placeholder="Enter your portal password" required />
-    <div class="err" id="err"></div>
-    <button type="submit" id="btn">Continue</button>
-  </form>
-</div>
+<form id="f" method="post" action="#">
+  <label for="u">Username</label>
+  <input id="u" name="username" type="email"
+         autocomplete="username"
+         placeholder="you@example.com" required autofocus />
+  <label for="p">Password</label>
+  <input id="p" name="password" type="password"
+         autocomplete="current-password"
+         placeholder="Enter your portal password" required />
+  <div class="err" id="err"></div>
+  <button type="submit" id="btn">Continue</button>
+</form>
 <script>
   function post(msg) {
-    window.parent.postMessage(Object.assign({isStreamlitMessage:true}, msg), "*");
+    window.parent.postMessage(Object.assign({isStreamlitMessage: true}, msg), "*");
   }
-  post({type:"streamlit:componentReady", apiVersion:1});
-  post({type:"streamlit:setFrameHeight", height: document.body.scrollHeight + 8});
+
+  function resize() {
+    post({type: "streamlit:setFrameHeight", height: document.body.scrollHeight + 4});
+  }
+
+  post({type: "streamlit:componentReady", apiVersion: 1});
+  resize();
 
   document.getElementById("f").addEventListener("submit", function(e) {
     e.preventDefault();
     var u = document.getElementById("u").value.trim();
     var p = document.getElementById("p").value;
-    if (!u || !p) { document.getElementById("err").textContent = "Please fill in both fields."; return; }
-    document.getElementById("err").textContent = "";
+    var errEl = document.getElementById("err");
+    if (!u || !p) {
+      errEl.textContent = "Please fill in both fields.";
+      errEl.className = "err visible";
+      resize();
+      return;
+    }
+    errEl.className = "err";
     document.getElementById("btn").disabled = true;
     document.getElementById("btn").textContent = "Signing in…";
-    post({type:"streamlit:setComponentValue", value:{username:u, password:p, ts:Date.now()}});
+    post({type: "streamlit:setComponentValue", value: {username: u, password: p, ts: Date.now()}});
   });
 
   window.addEventListener("message", function(ev) {
     if (!ev.data || ev.data.type !== "streamlit:render") return;
-    var args = (ev.data.args || {});
+    var args = ev.data.args || {};
+    var errEl = document.getElementById("err");
     if (args.error) {
-      document.getElementById("err").textContent = args.error;
+      errEl.textContent = args.error;
+      errEl.className = "err visible";
       document.getElementById("btn").disabled = false;
       document.getElementById("btn").textContent = "Continue";
-    }
-    if (args.clear) {
-      document.getElementById("u").value = "";
-      document.getElementById("p").value = "";
+      resize();
+    } else {
+      errEl.className = "err";
     }
   });
 </script>
@@ -602,8 +647,9 @@ if not ss.auth_user:
 
     _login_component = _cv1.declare_component("payroll_login_v3", path=_COMP_DIR)
 
+    st.subheader("Sign in")
     ss.setdefault("login_error", "")
-    result = _login_component(error=ss.login_error, key="login_comp")
+    result = _login_component(error=ss.login_error, key="login_comp", height=240)
 
     if result and result.get("username"):
         username = result["username"].strip()
