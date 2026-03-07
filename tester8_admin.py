@@ -506,30 +506,43 @@ with st.sidebar:
 #  LOGIN
 # ═════════════════════════════════════════════════════════════════════════════
 if not ss.auth_user:
-    # Fix browser/Google Password Manager autocomplete — Streamlit doesn't set
-    # name or autocomplete attributes, so the browser can't tell username from
-    # password fields and shows password suggestions on the username box.
-    st.markdown("""
+    # Fix Google Password Manager / browser autocomplete.
+    # st.markdown scripts are stripped by Streamlit's sanitiser on Cloud.
+    # st.components.v1.html runs in its own iframe but can reach window.top
+    # (same origin on Streamlit Cloud) where the real inputs live.
+    import streamlit.components.v1 as _components
+    _components.html("""
     <script>
     (function() {
-        function patchAutocomplete() {
-            var doc = window.parent.document;
-            var textInputs = doc.querySelectorAll('input[type="text"]');
-            var passInputs = doc.querySelectorAll('input[type="password"]');
-            if (textInputs.length > 0) {
-                textInputs[0].setAttribute('autocomplete', 'username');
-                textInputs[0].setAttribute('name', 'username');
+        function patch() {
+            var targets = [];
+            try { targets.push(window.top); } catch(e) {}
+            try { if (window.parent !== window.top) targets.push(window.parent); } catch(e) {}
+            targets.push(window);
+
+            for (var i = 0; i < targets.length; i++) {
+                try {
+                    var doc = targets[i].document;
+                    var textInputs = doc.querySelectorAll('input[type="text"]');
+                    var passInputs = doc.querySelectorAll('input[type="password"]');
+                    if (textInputs.length > 0 && passInputs.length > 0) {
+                        textInputs[0].setAttribute('autocomplete', 'username');
+                        textInputs[0].setAttribute('name', 'username');
+                        passInputs[0].setAttribute('autocomplete', 'current-password');
+                        passInputs[0].setAttribute('name', 'password');
+                        return true;
+                    }
+                } catch(e) {}
             }
-            if (passInputs.length > 0) {
-                passInputs[0].setAttribute('autocomplete', 'current-password');
-                passInputs[0].setAttribute('name', 'password');
-            }
+            return false;
         }
-        setTimeout(patchAutocomplete, 300);
-        setTimeout(patchAutocomplete, 900);
+        var attempts = 0;
+        var iv = setInterval(function() {
+            if (patch() || ++attempts > 25) clearInterval(iv);
+        }, 200);
     })();
     </script>
-    """, unsafe_allow_html=True)
+    """, height=0)
 
     with st.form("login", clear_on_submit=False):
         st.subheader("Sign in")
