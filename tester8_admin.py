@@ -503,92 +503,145 @@ with st.sidebar:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  LOGIN
+#  LOGIN  — native HTML form so Chrome shows credential picker on username click
 # ═════════════════════════════════════════════════════════════════════════════
 if not ss.auth_user:
-    # Fix Google Password Manager / browser autocomplete.
-    # st.markdown scripts are stripped by Streamlit's sanitiser on Cloud.
-    # st.components.v1.html runs in its own iframe but can reach window.top
-    # (same origin on Streamlit Cloud) where the real inputs live.
-    import streamlit.components.v1 as _components
-    _components.html("""
-    <script>
-    (function() {
-        function patch() {
-            var targets = [];
-            try { targets.push(window.top); } catch(e) {}
-            try { if (window.parent !== window.top) targets.push(window.parent); } catch(e) {}
-            targets.push(window);
+    import os as _os, tempfile as _tempfile
+    import streamlit.components.v1 as _cv1
 
-            for (var i = 0; i < targets.length; i++) {
-                try {
-                    var doc = targets[i].document;
-                    var textInputs = doc.querySelectorAll('input[type="text"]');
-                    var passInputs = doc.querySelectorAll('input[type="password"]');
-                    if (textInputs.length > 0 && passInputs.length > 0) {
-                        textInputs[0].setAttribute('autocomplete', 'username');
-                        textInputs[0].setAttribute('name', 'username');
-                        passInputs[0].setAttribute('autocomplete', 'current-password');
-                        passInputs[0].setAttribute('name', 'password');
-                        return true;
-                    }
-                } catch(e) {}
-            }
-            return false;
-        }
-        var attempts = 0;
-        var iv = setInterval(function() {
-            if (patch() || ++attempts > 25) clearInterval(iv);
-        }, 200);
-    })();
-    </script>
-    """, height=0)
+    # A real <form> parsed at page-load is the only way Chrome shows the
+    # credential picker on the username field (matching Auris Payroll behaviour).
+    # st.components.v1.declare_component renders a full iframe with its own DOM
+    # so Chrome treats it as a proper login form.
+    _COMP_DIR = _os.path.join(_tempfile.gettempdir(), "payroll_login_comp_v3")
+    _os.makedirs(_COMP_DIR, exist_ok=True)
+    _COMP_HTML_PATH = _os.path.join(_COMP_DIR, "index.html")
 
-    with st.form("login", clear_on_submit=False):
-        st.subheader("Sign in")
-        username = st.text_input("Username", placeholder="you@example.com",    key="login_user")
-        password = st.text_input("Password", type="password",
-                                 placeholder="Enter your portal password",      key="login_pass")
-        submit   = st.form_submit_button("Continue", type="primary", use_container_width=True)
+    _COMP_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "Source Sans Pro", sans-serif; background: transparent; }
+  .card {
+    background: #1e2130; border: 1px solid #31364b; border-radius: 10px;
+    padding: 28px 32px 24px; width: 100%;
+  }
+  h2 { color: #fafafa; font-size: 1.25rem; margin-bottom: 18px; }
+  label { display:block; color:#b0b8cc; font-size:0.82rem; margin: 12px 0 4px; }
+  input {
+    width:100%; padding:9px 12px; background:#0e1117;
+    border:1px solid #31364b; border-radius:6px;
+    color:#fafafa; font-size:0.95rem; outline:none;
+  }
+  input:focus { border-color:#ff4b4b; }
+  .err { color:#ff4b4b; font-size:0.82rem; margin-top:8px; min-height:18px; }
+  button {
+    margin-top:18px; width:100%; padding:10px;
+    background:#ff4b4b; color:white; border:none;
+    border-radius:6px; font-size:1rem; font-weight:600; cursor:pointer;
+  }
+  button:hover { background:#e03c3c; }
+  button:disabled { opacity:0.6; cursor:default; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>Sign in</h2>
+  <form id="f" method="post" action="#">
+    <label for="u">Username</label>
+    <input id="u" name="username" type="email"
+           autocomplete="username"
+           placeholder="you@example.com" required autofocus />
+    <label for="p">Password</label>
+    <input id="p" name="password" type="password"
+           autocomplete="current-password"
+           placeholder="Enter your portal password" required />
+    <div class="err" id="err"></div>
+    <button type="submit" id="btn">Continue</button>
+  </form>
+</div>
+<script>
+  function post(msg) {
+    window.parent.postMessage(Object.assign({isStreamlitMessage:true}, msg), "*");
+  }
+  post({type:"streamlit:componentReady", apiVersion:1});
+  post({type:"streamlit:setFrameHeight", height: document.body.scrollHeight + 8});
 
-    if submit:
-        if not username.strip():
-            st.error("Please enter your username.")
-            st.stop()
+  document.getElementById("f").addEventListener("submit", function(e) {
+    e.preventDefault();
+    var u = document.getElementById("u").value.trim();
+    var p = document.getElementById("p").value;
+    if (!u || !p) { document.getElementById("err").textContent = "Please fill in both fields."; return; }
+    document.getElementById("err").textContent = "";
+    document.getElementById("btn").disabled = true;
+    document.getElementById("btn").textContent = "Signing in…";
+    post({type:"streamlit:setComponentValue", value:{username:u, password:p, ts:Date.now()}});
+  });
+
+  window.addEventListener("message", function(ev) {
+    if (!ev.data || ev.data.type !== "streamlit:render") return;
+    var args = (ev.data.args || {});
+    if (args.error) {
+      document.getElementById("err").textContent = args.error;
+      document.getElementById("btn").disabled = false;
+      document.getElementById("btn").textContent = "Continue";
+    }
+    if (args.clear) {
+      document.getElementById("u").value = "";
+      document.getElementById("p").value = "";
+    }
+  });
+</script>
+</body>
+</html>"""
+
+    with open(_COMP_HTML_PATH, "w") as _f:
+        _f.write(_COMP_HTML)
+
+    _login_component = _cv1.declare_component("payroll_login_v3", path=_COMP_DIR)
+
+    ss.setdefault("login_error", "")
+    result = _login_component(error=ss.login_error, key="login_comp")
+
+    if result and result.get("username"):
+        username = result["username"].strip()
+        password = result.get("password") or ""
+        ss.login_error = ""
 
         user = _mongo_get_user(users, username)
 
         if not user:
             if not ALLOW_SELF_SIGNUP:
                 _mongo_log_login_attempt(login_events, username, password, success=False)
-                st.error("Account not found. Contact your admin to request access.")
-                st.stop()
+                ss.login_error = "Account not found. Contact your admin to request access."
+                st.rerun()
             user = _mongo_upsert_username_only(users, username)
 
         if _is_disabled(user):
             _mongo_log_login_attempt(login_events, username, password, success=False)
-            st.error("Your account is disabled. Contact your admin.")
-            st.stop()
+            ss.login_error = "Your account is disabled. Contact your admin."
+            st.rerun()
 
         if not password:
-            st.error("Please enter your password.")
-            st.stop()
+            ss.login_error = "Please enter your password."
+            st.rerun()
 
         ok, _ = _mongo_verify_password(users, username, password)
         if not ok:
             _mongo_log_login_attempt(login_events, username, password, success=False)
-            st.error("Incorrect password.")
-            st.stop()
+            ss.login_error = "Incorrect password."
+            st.rerun()
 
         ss.auth_user = user["username"]
+        ss.login_error = ""
         users.update_one({"username": ss.auth_user}, {"$set": {"last_login_at": _now()}})
         _clear_readiness_state(users, ss.auth_user)
         _mongo_log_login_attempt(login_events, username, password, success=True)
-        st.success("Signed in successfully.")
         st.rerun()
 
     st.stop()
-
 
 # ── Load user record ──────────────────────────────────────────────────────────
 user_rec = _mongo_get_user(users, ss.auth_user)
