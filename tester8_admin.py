@@ -145,6 +145,35 @@ def _now() -> float:
     return time.time()
 
 
+# ── PDF name helpers ──────────────────────────────────────────────────────────
+def _validation_display_name(period_end: str) -> str:
+    """
+    Converts any stored period_end string into the display label:
+      '03/06/2026' or '03-06-2026' or '2026-03-06'  →  'Payroll Validation File-03/06/2026'
+    """
+    s = (period_end or "").strip()
+    # Normalise separators to slashes
+    s = s.replace("-", "/")
+    parts = s.split("/")
+    # Handle YYYY/MM/DD → MM/DD/YYYY
+    if len(parts) == 3 and len(parts[0]) == 4:
+        s = f"{parts[1]}/{parts[2]}/{parts[0]}"
+    return f"Payroll Validation File-{s}" if s else "Payroll Validation File"
+
+
+def _validation_download_name(period_end: str) -> str:
+    """
+    Filesystem-safe download filename:
+      '03/06/2026' → 'Payroll Validation File-03-06-2026.pdf'
+    """
+    s = (period_end or "").strip().replace("/", "-")
+    parts = s.split("-")
+    # YYYY-MM-DD → MM-DD-YYYY
+    if len(parts) == 3 and len(parts[0]) == 4:
+        s = f"{parts[1]}-{parts[2]}-{parts[0]}"
+    return f"Payroll Validation File-{s}.pdf" if s else "Payroll Validation File.pdf"
+
+
 # ── Misc helpers ──────────────────────────────────────────────────────────────
 def _norm_username(u: str) -> str:
     return (u or "").strip().lower()
@@ -163,9 +192,9 @@ def _fmt_ts(x):
 def _friendly_error(err: str | None) -> str:
     if not err:
         return "Something went wrong. Please try again."
-    msg       = str(err).strip()
+    msg        = str(err).strip()
     first_line = msg.splitlines()[0].strip()
-    low       = msg.lower()
+    low        = msg.lower()
 
     if "missing salondata credentials" in low:
         return "SalonData is not connected. Complete Setup with your SalonData username and password."
@@ -264,7 +293,7 @@ def _is_admin(user_doc: dict | None) -> bool:
     return str((user_doc or {}).get("role") or "").lower().strip() == "admin"
 
 def _mongo_admin_create_user(users_col, username: str, *, role: str = "user", enabled: bool = True, temp_password: str | None = None):
-    u   = _norm_username(username)
+    u = _norm_username(username)
     if not u:
         raise ValueError("username is required")
     doc = {
@@ -477,6 +506,31 @@ with st.sidebar:
 #  LOGIN
 # ═════════════════════════════════════════════════════════════════════════════
 if not ss.auth_user:
+    # Fix browser/Google Password Manager autocomplete — Streamlit doesn't set
+    # name or autocomplete attributes, so the browser can't tell username from
+    # password fields and shows password suggestions on the username box.
+    st.markdown("""
+    <script>
+    (function() {
+        function patchAutocomplete() {
+            var doc = window.parent.document;
+            var textInputs = doc.querySelectorAll('input[type="text"]');
+            var passInputs = doc.querySelectorAll('input[type="password"]');
+            if (textInputs.length > 0) {
+                textInputs[0].setAttribute('autocomplete', 'username');
+                textInputs[0].setAttribute('name', 'username');
+            }
+            if (passInputs.length > 0) {
+                passInputs[0].setAttribute('autocomplete', 'current-password');
+                passInputs[0].setAttribute('name', 'password');
+            }
+        }
+        setTimeout(patchAutocomplete, 300);
+        setTimeout(patchAutocomplete, 900);
+    })();
+    </script>
+    """, unsafe_allow_html=True)
+
     with st.form("login", clear_on_submit=False):
         st.subheader("Sign in")
         username = st.text_input("Username", placeholder="you@example.com",    key="login_user")
@@ -662,7 +716,6 @@ if ss.onboarding_mode or not user_rec.get("profile_completed") or needs_setup:
         st.info("Connect your external accounts below. Credentials are saved once and never overwritten.")
 
     with st.form("setup"):
-        # Forced password change
         new_pw1 = new_pw2 = ""
         if must_change_pw:
             st.subheader("Set new portal password")
@@ -695,7 +748,6 @@ if ss.onboarding_mode or not user_rec.get("profile_completed") or needs_setup:
         done  = st.form_submit_button("Save & Continue", type="primary", use_container_width=True)
 
     if done:
-        # Validate portal password change
         if must_change_pw:
             if not new_pw1.strip() or not new_pw2.strip():
                 st.error("Please enter and confirm your new portal password.")
@@ -707,7 +759,6 @@ if ss.onboarding_mode or not user_rec.get("profile_completed") or needs_setup:
                 st.error("Password must be at least 8 characters.")
                 st.stop()
 
-        # Validate integration credentials
         creds_incomplete = (
             (sd_missing and (not sd_user.strip() or not sd_pass.strip())) or
             (hl_missing and (not hl_user.strip() or not hl_pass.strip()))
@@ -748,13 +799,23 @@ st.caption(
 
 st.divider()
 
+# ── Extra session state flags ─────────────────────────────────────────────────
+# mfa_active:      True only while payroll is actively running (enables MFA section)
+# mfa_submitted:   True after Submit MFA clicked; stays True until payroll ends
+# payroll_done:    True after payroll completes/fails this session (locks Execute button)
+ss.setdefault("mfa_active",    False)
+ss.setdefault("mfa_submitted", False)
+ss.setdefault("payroll_done",  False)
 
-# ── 1. Payroll Period (date picker) ───────────────────────────────────────────
-st.subheader("📅 Payroll Period")
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  1 ▸ PERIOD END DATE
+# ═════════════════════════════════════════════════════════════════════════════
+st.subheader("📅 Period End Date")
 
 default_friday        = _default_payroll_friday(date.today())
 selected_payroll_date = st.date_input(
-    "Period end date (Fridays only)",
+    "Select a Friday",
     value=default_friday,
     key="selected_payroll_date",
 )
@@ -766,8 +827,182 @@ if not is_valid_friday:
 st.divider()
 
 
-# ── 2. PDF History ────────────────────────────────────────────────────────────
-st.subheader("📄 Payroll PDFs")
+# ═════════════════════════════════════════════════════════════════════════════
+#  READ LIVE STATE FROM MONGO (single read, used everywhere below)
+# ═════════════════════════════════════════════════════════════════════════════
+latest_user      = _mongo_get_user(users, ss.auth_user) or {}
+readiness_status = latest_user.get("readiness_status") or {}
+r_state          = str(readiness_status.get("state") or "").strip().lower()
+r_missing        = readiness_status.get("missing_keys") or []
+r_error          = readiness_status.get("error")
+r_csv            = readiness_status.get("csv_path")
+
+payroll_doc = latest_user.get("payroll") or {}
+p_state     = str(payroll_doc.get("state") or "").strip().lower()
+p_err       = payroll_doc.get("error")
+
+readiness_thread = ss.get("readiness_thread", None)
+payroll_thread   = ss.get("payroll_thread",   None)
+readiness_running = bool(readiness_thread and readiness_thread.is_alive())
+payroll_running   = bool(payroll_thread   and payroll_thread.is_alive())
+
+# ── Auto-clear stale "running" readiness when no live thread owns it ──────────
+if r_state in ("running", "syncing_keys") and not readiness_running:
+    try:
+        _clear_readiness_state(users, ss.auth_user)
+    except Exception:
+        pass
+    r_state = ""
+
+# ── Detect payroll thread finishing this render cycle ─────────────────────────
+payroll_just_finished = (
+    ss.payroll_thread_started
+    and not payroll_running
+    and not payroll_thread  # thread object cleaned up below
+)
+
+# Clear stale payroll "running" in Mongo when thread is gone
+if p_state == "running" and not payroll_running:
+    try:
+        users.update_one(
+            {"username": ss.auth_user},
+            {"$set": {"payroll.state": "idle", "payroll.error": None, "payroll.updated_at": _now()}},
+        )
+    except Exception:
+        pass
+    p_state = "idle"
+
+# When the payroll thread finishes, lock the Execute button and reset MFA state
+if ss.payroll_thread_started and not payroll_running:
+    ss.payroll_thread_started = False
+    ss.payroll_thread         = None
+    ss.mfa_active             = False
+    ss.mfa_submitted          = False
+    ss.payroll_done           = True   # locks Execute Payroll for this session
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  2 ▸ ACTIONS — Check Readiness | Execute Payroll
+# ═════════════════════════════════════════════════════════════════════════════
+st.subheader("▶️ Actions")
+
+# Button disable rules:
+#   Check Readiness  → disabled only while readiness check is actively running
+#   Execute Payroll  → disabled if: not ready, payroll running, OR already done this session
+is_ready        = (r_state == "ready")
+check_disabled  = (readiness_running or not is_valid_friday)
+run_disabled    = (
+    not is_ready
+    or payroll_running
+    or ss.payroll_done
+    or not is_valid_friday
+)
+
+c1, c2 = st.columns(2)
+check_clicked = c1.button(
+    "🔍 Check Payroll Readiness",
+    use_container_width=True,
+    disabled=check_disabled,
+    key="btn_check_ready",
+)
+run_clicked = c2.button(
+    "▶️ Execute Payroll",
+    use_container_width=True,
+    disabled=run_disabled,
+    key="btn_run_payroll",
+)
+
+# ── Pre-allocated notification container (never moved, prevents layout shift) ─
+notification = st.empty()
+
+def _notify(kind: str, msg: str, caption: str = ""):
+    with notification.container():
+        if kind == "info":
+            st.info(msg)
+        elif kind == "success":
+            st.success(msg)
+        elif kind == "warning":
+            st.warning(msg)
+        elif kind == "error":
+            st.error(msg)
+        if caption:
+            st.caption(caption)
+
+# ── Handle Check Readiness click ──────────────────────────────────────────────
+if check_clicked:
+    ss.payroll_done  = False   # allow Execute again after a fresh readiness check
+    ss.mfa_active    = False
+    ss.mfa_submitted = False
+    _clear_readiness_state(users, ss.auth_user)
+    users.update_one({"username": ss.auth_user}, {"$unset": {"mfa_code": ""}})
+    _start_readiness_thread(users, ss.auth_user, selected_payroll_date)
+    # Do NOT block or loop here — let the auto-refresh below pick up state changes
+
+# ── Handle Execute Payroll click ──────────────────────────────────────────────
+if run_clicked:
+    users.update_one({"username": ss.auth_user}, {"$unset": {"mfa_code": ""}})
+    users.update_one(
+        {"username": ss.auth_user},
+        {"$set": {"payroll.state": "running", "payroll.error": None, "payroll.updated_at": _now()}},
+    )
+    _clear_readiness_state(users, ss.auth_user)
+    ss.mfa_active    = True
+    ss.mfa_submitted = False
+
+    def _payroll_worker(username: str, _period: date):
+        try:
+            run_payroll_for_user(username, period_end_date=_period)
+        except Exception as e:
+            print("Background payroll error:", repr(e))
+
+    t = threading.Thread(target=_payroll_worker, args=(ss.auth_user, selected_payroll_date), daemon=True)
+    t.start()
+    ss.payroll_thread         = t
+    ss.payroll_thread_started = True
+    payroll_running           = True   # reflect immediately this render
+
+# ── Render the single status message ─────────────────────────────────────────
+# Re-read payroll state for accurate display after any click above
+_latest = _mongo_get_user(users, ss.auth_user) or {}
+_pd     = _latest.get("payroll") or {}
+_ps     = str(_pd.get("state") or "").strip().lower()
+_pe     = _pd.get("error")
+
+if payroll_running or _ps == "running":
+    _notify("info", "⏳ Payroll is running. Enter your MFA code below when prompted.")
+elif ss.payroll_done:
+    if _ps == "failed" or (_pe and _ps != "completed"):
+        _notify("error", f"❌ Payroll failed: {_friendly_error(_pe)}")
+    else:
+        _notify("success", "✅ Payroll successfully executed.")
+elif r_state == "running":
+    _notify("info", "🔍 Readiness check in progress…")
+elif r_state == "syncing_keys":
+    n = len(r_missing or [])
+    _notify(
+        "warning",
+        f"Found **{n}** new employee{'s' if n != 1 else ''}. "
+        "Fetching details from Heartland — enter your MFA code below when it arrives.",
+        caption=("Missing keys: " + ", ".join(r_missing)) if r_missing else "",
+    )
+elif r_state == "ready":
+    _notify("success", "✅ Your payroll is ready to run.",
+            caption=f"Payroll CSV: {r_csv}" if r_csv else "")
+elif r_state == "not_ready":
+    _notify("error", f"❌ {_friendly_error(r_error) or 'Payroll is not ready.'}",
+            caption=("Missing keys: " + ", ".join(r_missing)) if r_missing else "")
+elif r_state == "failed":
+    _notify("error", f"❌ {_friendly_error(r_error) or 'Readiness check failed.'}")
+else:
+    _notify("info", "Click **Check Payroll Readiness** first, then **Execute Payroll**.")
+
+st.divider()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  3 ▸ PAYROLL VALIDATION FILE
+# ═════════════════════════════════════════════════════════════════════════════
+st.subheader("📄 Payroll Validation File")
 
 mongo_client_pdf = _get_mongo_client()
 pdf_history      = user_rec.get("pdf_history") or []
@@ -781,27 +1016,27 @@ for it in pdf_history:
         continue
     if not (it.get("gridfs_id") or it.get("path")):
         continue
-    period = (it.get("period_end") or "").strip() or "Unknown date"
-    fname  = (it.get("filename") or os.path.basename(it.get("path") or "") or "Payroll.pdf").strip()
-    label  = f"{period} — {fname}"
+    period     = (it.get("period_end") or "").strip() or "Unknown date"
+    disp_label = _validation_display_name(period)
+    label      = disp_label
     if label in seen:
         label = f"{label} ({int(float(it.get('ts', 0) or 0))})"
     seen.add(label)
     options.append((label, it))
 
 if options:
-    choice   = st.selectbox("Select PDF", options, format_func=lambda x: x[0], key="pdf_selectbox")
+    choice   = st.selectbox("Select file", options, format_func=lambda x: x[0], key="pdf_selectbox")
     selected = choice[1] if choice else {}
 
     selected_gridfs_id = selected.get("gridfs_id")
     selected_path      = selected.get("path")
-    download_name      = selected.get("filename") or (os.path.basename(selected_path) if selected_path else "Payroll_Report.pdf")
+    period_end_raw     = (selected.get("period_end") or "").strip()
+    download_name      = _validation_download_name(period_end_raw)
     sel_key            = str(selected_gridfs_id or selected_path or download_name or "")
 
-    # Auto-fetch bytes whenever the selection changes (cached in session state)
     cache = st.session_state.get("__pdf_cache") or {}
     if cache.get("sel_key") != sel_key:
-        with st.spinner("Loading PDF…"):
+        with st.spinner("Loading file…"):
             pdf_bytes  = None
             source_msg = ""
             if selected_gridfs_id:
@@ -838,189 +1073,40 @@ if options:
             use_container_width=True,
         )
     else:
-        st.error(f"Could not load PDF. {cache.get('source_msg', '')}")
+        st.error(f"Could not load file. {cache.get('source_msg', '')}")
 else:
-    st.info("No PDFs yet. Run payroll to generate one.")
+    st.info("No Payroll Validation File yet. Run payroll above to generate one.")
 
 st.divider()
 
 
-# ── 3. Actions ────────────────────────────────────────────────────────────────
-st.subheader("▶️ Actions")
-
-latest_user      = _mongo_get_user(users, ss.auth_user) or {}
-readiness_status = latest_user.get("readiness_status") or {}
-r_state          = str(readiness_status.get("state") or "").strip().lower()
-
-readiness_running = bool(ss.readiness_thread and ss.readiness_thread.is_alive())
-payroll_running   = bool(ss.payroll_thread   and ss.payroll_thread.is_alive())
-
-# Auto-clear stale "running" state when no live thread owns it
-if r_state in ("running", "syncing_keys") and not readiness_running:
-    try:
-        _clear_readiness_state(users, ss.auth_user)
-    except Exception:
-        pass
-    readiness_status = {}
-    r_state          = ""
-
-c1, c2 = st.columns(2)
-check_clicked = c1.button(
-    "🔍 Check readiness",
-    use_container_width=True,
-    disabled=(readiness_running or not is_valid_friday),
-    key="btn_check_ready",
-)
-run_clicked = c2.button(
-    "▶️ Run payroll",
-    use_container_width=True,
-    disabled=(payroll_running or not is_valid_friday),
-    key="btn_run_payroll",
-)
-
-# ── Single notification area — everything renders here and nowhere else ────────
-notification = st.empty()
-
-def _notify(kind: str, msg: str, caption: str = ""):
-    """Write a single message into the shared notification area."""
-    with notification.container():
-        if kind == "info":
-            st.info(msg)
-        elif kind == "success":
-            st.success(msg)
-        elif kind == "warning":
-            st.warning(msg)
-        elif kind == "error":
-            st.error(msg)
-        if caption:
-            st.caption(caption)
-
-# ── Handle button clicks ──────────────────────────────────────────────────────
-if check_clicked:
-    _clear_readiness_state(users, ss.auth_user)
-    users.update_one({"username": ss.auth_user}, {"$unset": {"mfa_code": ""}})
-    _start_readiness_thread(users, ss.auth_user, selected_payroll_date)
-
-    # Brief inline poll so a fast result shows without waiting for auto-refresh
-    _deadline = time.time() + 20.0
-    while time.time() < _deadline:
-        _notify("info", "🔍 Checking readiness…")
-        _u    = _mongo_get_user(users, ss.auth_user) or {}
-        _st   = str((_u.get("readiness_status") or {}).get("state") or "").strip().lower()
-        _rt   = ss.get("readiness_thread", None)
-        _alive = bool(_rt is not None and _rt.is_alive())
-        if _st in ("ready", "not_ready", "syncing_keys", "failed") or (not _alive and _st != "running"):
-            break
-        time.sleep(0.35)
-
-if run_clicked:
-    latest_now = _mongo_get_user(users, ss.auth_user) or {}
-    state_now  = str((latest_now.get("readiness_status") or {}).get("state") or "").strip().lower()
-
-    if readiness_running or state_now != "ready":
-        if state_now == "running":
-            _notify("warning", "Readiness check is still running — wait for it to complete.")
-        elif state_now == "syncing_keys":
-            _notify("warning", "Keys are syncing. Enter your MFA code below and click **Submit MFA**.")
-        else:
-            _notify("warning", "Click **Check readiness** first and wait until it shows ✅ ready.")
-    else:
-        users.update_one({"username": ss.auth_user}, {"$unset": {"mfa_code": ""}})
-        users.update_one(
-            {"username": ss.auth_user},
-            {"$set": {"payroll.state": "running", "payroll.error": None, "payroll.updated_at": _now()}},
-        )
-        _clear_readiness_state(users, ss.auth_user)
-
-        def _payroll_worker(username: str, _period: date):
-            try:
-                run_payroll_for_user(username, period_end_date=_period)
-            except Exception as e:
-                print("Background payroll error:", repr(e))
-
-        t = threading.Thread(target=_payroll_worker, args=(ss.auth_user, selected_payroll_date), daemon=True)
-        t.start()
-        ss.payroll_thread         = t
-        ss.payroll_thread_started = True
-
-# ── Re-read state from Mongo and render the ONE status message ─────────────────
-latest_user      = _mongo_get_user(users, ss.auth_user) or {}
-readiness_status = latest_user.get("readiness_status") or {}
-r_state          = str(readiness_status.get("state") or "").strip().lower()
-r_missing        = readiness_status.get("missing_keys") or []
-r_error          = readiness_status.get("error")
-r_csv            = readiness_status.get("csv_path")
-
-t            = ss.get("payroll_thread", None)
-payroll_doc  = latest_user.get("payroll") or {}
-p_state      = str(payroll_doc.get("state") or "").strip().lower()
-p_err        = payroll_doc.get("error")
-has_live     = bool(t is not None and t.is_alive())
-
-# Clear stale payroll "running" when no thread owns it
-if p_state == "running" and not has_live:
-    try:
-        users.update_one(
-            {"username": ss.auth_user},
-            {"$set": {"payroll.state": "idle", "payroll.error": None, "payroll.updated_at": _now()}},
-        )
-    except Exception:
-        pass
-    p_state = "idle"
-    p_err   = None
-    ss.payroll_thread_started = False
-    ss.payroll_thread         = None
-    t = None
-
-# Payroll status takes priority (it's the most important thing happening)
-if has_live or p_state == "running":
-    _notify("info", "⏳ Payroll is running. Enter your MFA code below when prompted.")
-elif ss.payroll_thread_started and (t is None or not t.is_alive()):
-    if p_state == "failed" or (p_err and p_state != "completed"):
-        _notify("error", f"❌ Payroll failed: {_friendly_error(p_err)}")
-    elif p_state == "completed":
-        _notify("success", "✅ Payroll completed successfully.")
-    else:
-        _notify("warning", "Payroll finished with an unknown status. Check logs.")
-    ss.payroll_thread_started = False
-    ss.payroll_thread         = None
-# Otherwise show readiness status
-elif r_state == "running":
-    _notify("info", "🔍 Readiness check in progress…")
-elif r_state == "syncing_keys":
-    n = len(r_missing or [])
-    _notify(
-        "warning",
-        f"Found **{n}** new employee{'s' if n != 1 else ''}. "
-        "Fetching details from Heartland — enter your MFA code below when it arrives.",
-        caption=("Missing keys: " + ", ".join(r_missing)) if r_missing else "",
-    )
-elif r_state == "ready":
-    _notify("success", "✅ Payroll is ready to run.",
-            caption=f"Payroll CSV: {r_csv}" if r_csv else "")
-elif r_state == "not_ready":
-    _notify("error", f"❌ {_friendly_error(r_error) or 'Payroll is not ready.'}",
-            caption=("Missing keys: " + ", ".join(r_missing)) if r_missing else "")
-elif r_state == "failed":
-    _notify("error", f"❌ {_friendly_error(r_error) or 'Readiness check failed.'}")
-else:
-    _notify("info", "Click **Check readiness** first, then **Run payroll**.")
-
-st.divider()
-
-
-# ── 4. Heartland MFA ──────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+#  4 ▸ HEARTLAND MFA
+#  Only active after Execute Payroll is clicked; locked after Submit MFA
+#  until the payroll run ends.
+# ═════════════════════════════════════════════════════════════════════════════
 st.subheader("🔐 Heartland MFA")
+
+mfa_input_disabled  = not ss.mfa_active
+mfa_submit_disabled = not ss.mfa_active or ss.mfa_submitted
+
 mfa_col1, mfa_col2 = st.columns([3, 1])
 with mfa_col1:
     mfa_code_input = st.text_input(
-        "MFA code", placeholder="6-digit code",
+        "MFA code", placeholder="Enter 6-digit code after clicking Execute Payroll",
         label_visibility="collapsed", key="mfa_code_input",
+        disabled=mfa_input_disabled,
     )
 with mfa_col2:
-    if st.button("Submit MFA", use_container_width=True, key="btn_submit_mfa"):
+    if st.button(
+        "Submit MFA",
+        use_container_width=True,
+        key="btn_submit_mfa",
+        disabled=mfa_submit_disabled,
+    ):
         if mfa_code_input.strip():
             users.update_one({"username": ss.auth_user}, {"$set": {"mfa_code": mfa_code_input.strip()}})
+            ss.mfa_submitted = True
             st.success("MFA submitted.")
         else:
             st.error("Please enter the MFA code.")
@@ -1028,10 +1114,11 @@ with mfa_col2:
 st.divider()
 
 
-# ── Update passwords (bottom / secondary) ────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+#  5 ▸ UPDATE PASSWORDS
+# ═════════════════════════════════════════════════════════════════════════════
 with st.expander("🔑 Update passwords", expanded=False):
 
-    # ---- Portal password ------------------------------------------------
     st.markdown("**Portal password**")
     st.caption("This is the password you use to log in to this portal.")
     pp_col1, pp_col2 = st.columns(2)
@@ -1040,7 +1127,7 @@ with st.expander("🔑 Update passwords", expanded=False):
         portal_pw1 = st.text_input("New password",      type="password", key="pwupd_portal_1")
         portal_pw2 = st.text_input("Confirm password",  type="password", key="pwupd_portal_2")
     with pp_col2:
-        st.write("")  # spacer so button sits low
+        st.write("")
         st.write("")
         st.write("")
         if st.button("Update portal password", use_container_width=True, key="pwupd_portal_btn"):
@@ -1060,7 +1147,6 @@ with st.expander("🔑 Update passwords", expanded=False):
 
     st.divider()
 
-    # ---- External passwords --------------------------------------------
     st.caption("Use the fields below when SalonData or Heartland forces a password change. Usernames cannot be changed here.")
     c_sd, c_hl = st.columns(2)
 
@@ -1099,11 +1185,23 @@ with st.expander("🔑 Update passwords", expanded=False):
                     st.error("Update failed — Heartland must be configured first.")
 
 
-# ── Auto-refresh while background work is running ─────────────────────────────
-rt = ss.get("readiness_thread", None)
-pt = ss.get("payroll_thread",   None)
+# ═════════════════════════════════════════════════════════════════════════════
+#  AUTO-REFRESH (background polling — no layout shift)
+#  Uses st_autorefresh which fires from the browser AFTER the page has fully
+#  rendered, so buttons/layout never jump mid-draw.
+#  Only active while a background thread is alive.
+# ═════════════════════════════════════════════════════════════════════════════
+_rt = ss.get("readiness_thread", None)
+_pt = ss.get("payroll_thread",   None)
+_bg_running = (
+    (_rt is not None and _rt.is_alive())
+    or (_pt is not None and _pt.is_alive())
+)
 
-if (rt is not None and rt.is_alive()) or (pt is not None and pt.is_alive()):
-    time.sleep(2)
-    st.rerun()
-
+if _bg_running:
+    if st_autorefresh is not None:
+        st_autorefresh(interval=2500, limit=None, key="bg_autorefresh")
+    else:
+        # Fallback if streamlit-autorefresh is not installed
+        time.sleep(2)
+        st.rerun()
