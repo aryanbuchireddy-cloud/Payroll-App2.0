@@ -523,41 +523,57 @@ if not ss.auth_user:
 <meta charset="utf-8"/>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { background: #0e1117; }
-  body {
-    font-family: "Source Sans Pro", -apple-system, sans-serif;
-    padding: 4px 2px 8px;
-    color: #fafafa;
+
+  /* ── Light mode (Streamlit default) ── */
+  html, body {
+    background: #ffffff;
+    color: #31333f;
   }
   label {
     display: block;
     font-size: 0.875rem;
-    color: #fafafa;
+    color: #31333f;
     margin: 16px 0 6px;
     font-weight: 400;
   }
-  label:first-of-type { margin-top: 0; }
   input {
     width: 100%;
     padding: 8px 12px;
-    background: transparent;
-    border: 1px solid rgba(250,250,250,0.2);
+    background: #ffffff;
+    border: 1px solid #d0d3da;
     border-radius: 6px;
-    color: #fafafa;
+    color: #31333f;
     font-size: 0.95rem;
     outline: none;
     transition: border-color 0.15s, box-shadow 0.15s;
   }
+  input::placeholder { color: #adb5bd; }
+
+  /* ── Dark mode ── */
+  @media (prefers-color-scheme: dark) {
+    html, body { background: #0e1117; color: #fafafa; }
+    label { color: #fafafa; }
+    input {
+      background: transparent;
+      border-color: rgba(250,250,250,0.2);
+      color: #fafafa;
+    }
+    input::placeholder { color: rgba(250,250,250,0.35); }
+  }
+
+  body {
+    font-family: "Source Sans Pro", -apple-system, sans-serif;
+    padding: 4px 2px 8px;
+  }
+  label:first-of-type { margin-top: 0; }
   input:focus {
     border-color: #ff4b4b;
     box-shadow: 0 0 0 2px rgba(255,75,75,0.25);
   }
-  input::placeholder { color: rgba(250,250,250,0.35); }
   .err {
     color: #ff4b4b;
     font-size: 0.82rem;
     margin-top: 10px;
-    min-height: 18px;
     padding: 6px 10px;
     background: rgba(255,75,75,0.12);
     border-radius: 4px;
