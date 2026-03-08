@@ -934,6 +934,7 @@ st.divider()
 ss.setdefault("mfa_active",    False)
 ss.setdefault("mfa_submitted", False)
 ss.setdefault("payroll_done",  False)
+ss.setdefault("mfa_thank_you", False)   # True for one render after Submit MFA
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1061,6 +1062,7 @@ if check_clicked:
     ss.payroll_done  = False   # allow Execute again after a fresh readiness check
     ss.mfa_active    = False
     ss.mfa_submitted = False
+    ss.mfa_thank_you = False
     _clear_readiness_state(users, ss.auth_user)
     users.update_one({"username": ss.auth_user}, {"$unset": {"mfa_code": ""}})
     _start_readiness_thread(users, ss.auth_user, selected_payroll_date)
@@ -1090,29 +1092,63 @@ if run_clicked:
     payroll_running           = True   # reflect immediately this render
 
 # ── Render the single status message ─────────────────────────────────────────
-# Re-read payroll state for accurate display after any click above
-_latest = _mongo_get_user(users, ss.auth_user) or {}
-_pd     = _latest.get("payroll") or {}
-_ps     = str(_pd.get("state") or "").strip().lower()
-_pe     = _pd.get("error")
+# Re-read payroll state for accurate display after any click above.
+# The backend can optionally write payroll.state = "awaiting_mfa" just before
+# calling _wait_for_mfa_code(), and readiness_status.state = "awaiting_mfa"
+# just before waiting during a key sync — this unlocks the specific "Please
+# enter your MFA code now" message.  All other states degrade gracefully.
+_latest  = _mongo_get_user(users, ss.auth_user) or {}
+_pd      = _latest.get("payroll") or {}
+_ps      = str(_pd.get("state") or "").strip().lower()
+_pe      = _pd.get("error")
+_rlatest = _latest.get("readiness_status") or {}
+_rs_sub  = str(_rlatest.get("substate") or "").strip().lower()   # "awaiting_mfa" if backend writes it
 
+# ── Payroll execution messages ────────────────────────────────────────────────
 if payroll_running or _ps == "running":
-    _notify("info", "⏳ Payroll is running. Enter your MFA code below when prompted.")
+    if ss.mfa_thank_you:
+        # Flash "Thank you" for exactly one render cycle, then transition to finishing
+        _notify("success", "✅ Thank you — MFA received. Finishing up…")
+        ss.mfa_thank_you = False
+    elif ss.mfa_submitted:
+        _notify("info", "⚙️ Finishing execution — uploading to Heartland…")
+    elif _ps == "awaiting_mfa":
+        _notify("warning", "🔐 Please enter your MFA code now")
+    else:
+        _notify("info", "⏳ Executing payroll…")
+
+# ── Payroll completed / failed ────────────────────────────────────────────────
 elif ss.payroll_done:
     if _ps == "failed" or (_pe and _ps != "completed"):
         _notify("error", f"❌ Payroll failed: {_friendly_error(_pe)}")
     else:
         _notify("success", "✅ Payroll successfully executed.")
+
+# ── Readiness check messages ──────────────────────────────────────────────────
 elif r_state == "running":
-    _notify("info", "🔍 Readiness check in progress…")
+    _notify("info", "🔍 Checking payroll readiness…")
+
 elif r_state == "syncing_keys":
     n = len(r_missing or [])
-    _notify(
-        "warning",
-        f"Found **{n}** new employee{'s' if n != 1 else ''}. "
-        "Fetching details from Heartland — enter your MFA code below when it arrives.",
-        caption=("Missing keys: " + ", ".join(r_missing)) if r_missing else "",
-    )
+    names_caption = ("New employees: " + ", ".join(r_missing)) if r_missing else ""
+    if ss.mfa_thank_you:
+        _notify("success", "✅ Thank you — MFA received. Finishing sync…",
+                caption=names_caption)
+        ss.mfa_thank_you = False
+    elif ss.mfa_submitted:
+        _notify("info", "⚙️ Finishing sync — importing keys from Heartland…",
+                caption=names_caption)
+    elif _rs_sub == "awaiting_mfa":
+        _notify("warning", "🔐 Please enter your MFA code now",
+                caption=names_caption)
+    else:
+        _notify(
+            "warning",
+            f"Found **{n}** new employee{'s' if n != 1 else ''} — heading to Heartland to fetch IDs…",
+            caption=names_caption,
+        )
+
+# ── Readiness final states ────────────────────────────────────────────────────
 elif r_state == "ready":
     _notify("success", "✅ Your payroll is ready to run.",
             caption=f"Payroll CSV: {r_csv}" if r_csv else "")
@@ -1215,8 +1251,8 @@ st.divider()
 # ═════════════════════════════════════════════════════════════════════════════
 st.subheader("🔐 Heartland MFA")
 
-mfa_input_disabled  = not ss.mfa_active
-mfa_submit_disabled = not ss.mfa_active or ss.mfa_submitted
+mfa_input_disabled  = not (ss.mfa_active or (r_state == "syncing_keys" and readiness_running))
+mfa_submit_disabled = not (ss.mfa_active or (r_state == "syncing_keys" and readiness_running)) or ss.mfa_submitted
 
 mfa_col1, mfa_col2 = st.columns([3, 1])
 with mfa_col1:
@@ -1235,7 +1271,8 @@ with mfa_col2:
         if mfa_code_input.strip():
             users.update_one({"username": ss.auth_user}, {"$set": {"mfa_code": mfa_code_input.strip()}})
             ss.mfa_submitted = True
-            st.success("MFA submitted.")
+            ss.mfa_thank_you = True
+            st.rerun()
         else:
             st.error("Please enter the MFA code.")
 
