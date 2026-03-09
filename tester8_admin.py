@@ -941,6 +941,7 @@ ss.setdefault("mfa_active",    False)
 ss.setdefault("mfa_submitted", False)
 ss.setdefault("payroll_done",  False)
 ss.setdefault("mfa_thank_you", False)   # True for one render after Submit MFA
+ss.setdefault("notify_msg",    ("info", "Click **Check Payroll Readiness** first, then **Execute Payroll**.", ""))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1047,21 +1048,26 @@ run_clicked = c2.button(
     key="btn_run_payroll",
 )
 
-# ── Pre-allocated notification container (never moved, prevents layout shift) ─
-notification = st.empty()
-
+# ── Notification: render immediately from session state (no blank-frame blink) ─
 def _notify(kind: str, msg: str, caption: str = ""):
-    with notification.container():
-        if kind == "info":
-            st.info(msg)
-        elif kind == "success":
-            st.success(msg)
-        elif kind == "warning":
-            st.warning(msg)
-        elif kind == "error":
-            st.error(msg)
-        if caption:
-            st.caption(caption)
+    """Store message — rendered at top of NEXT render cycle with no blank gap."""
+    ss.notify_msg = (kind, msg, caption)
+
+def _render_notify():
+    _nm = ss.get("notify_msg") or ("info", "Click **Check Payroll Readiness** first, then **Execute Payroll**.", "")
+    kind, msg, caption = _nm
+    if kind == "info":
+        st.info(msg)
+    elif kind == "success":
+        st.success(msg)
+    elif kind == "warning":
+        st.warning(msg)
+    elif kind == "error":
+        st.error(msg)
+    if caption:
+        st.caption(caption)
+
+_render_notify()
 
 # ── Handle Check Readiness click ──────────────────────────────────────────────
 if check_clicked:
