@@ -126,6 +126,7 @@ ss.setdefault("payroll_thread_started",  False)
 ss.setdefault("payroll_thread",          None)
 ss.setdefault("readiness_thread_started", False)
 ss.setdefault("readiness_thread",        None)
+ss.setdefault("last_login_ts",           0)     # guards against component replaying last value
 
 
 # ── Date helpers ──────────────────────────────────────────────────────────────
@@ -667,7 +668,12 @@ if not ss.auth_user:
     ss.setdefault("login_error", "")
     result = _login_component(error=ss.login_error, key="login_comp", height=240)
 
-    if result and result.get("username"):
+    # The component persists its last submitted value across every rerun, so we
+    # guard with a timestamp: only process a submission we haven't seen before.
+    _result_ts = int((result or {}).get("ts") or 0)
+    if result and result.get("username") and _result_ts > ss.last_login_ts:
+        ss.last_login_ts = _result_ts   # mark as handled immediately — prevents replay loop
+
         username = result["username"].strip()
         password = result.get("password") or ""
         ss.login_error = ""
