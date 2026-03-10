@@ -953,14 +953,42 @@ async def _open_employee_id_report_modal(page: Page, portal_username: str):
 
 
 async def _download_employee_excel_from_heartland(page: Page, hl_user: str, hl_pass: str, username: str) -> str:
+    async def _select_dropdown_report(label_text: str, option_text: str = None, option_index: int = 0):
+        import re as _re
+        field = page.locator("mat-form-field").filter(has_text=_re.compile(label_text, _re.I)).first
+        overlay_options = page.locator(
+            ".cdk-overlay-pane mat-option, .cdk-overlay-pane .mat-mdc-option, "
+            ".cdk-overlay-container mat-option, .cdk-overlay-container .mat-mdc-option, [role='option']"
+        )
+        trigger = field.locator(".mat-mdc-select-trigger, .mat-select-trigger, mat-select").first
+        opened = False
+        for attempt in [lambda: trigger.click(force=True), lambda: field.click(force=True), lambda: trigger.press("Enter")]:
+            try:
+                await attempt()
+                await page.wait_for_timeout(1200)
+                if await overlay_options.count() > 0:
+                    opened = True
+                    break
+            except Exception:
+                pass
+        if not opened:
+            raise RuntimeError(f"Could not open dropdown for '{label_text}' on report modal.")
+        if option_text:
+            option = overlay_options.filter(has_text=_re.compile(_re.escape(option_text), _re.I)).first
+            if await option.count() == 0:
+                option = overlay_options.nth(option_index)
+        else:
+            option = overlay_options.nth(option_index)
+        await option.wait_for(state="visible", timeout=20000)
+        await option.scroll_into_view_if_needed()
+        await option.click(force=True)
+        await page.wait_for_timeout(800)
+
     await _heartland_login(page, hl_user, hl_pass, username)
     await _open_employee_id_report_modal(page, username)
     try:
-        await page.locator("div.mat-select-trigger").nth(3).click()
-        try:
-            await page.locator('mat-option >> text=Excel').click()
-        except Exception:
-            await page.locator("mat-option").nth(1).click()
+        print("🔽 Output Type: Excel")
+        await _select_dropdown_report(r"Output\s*Type", "Excel")
     except Exception as e:
         print(f"⚠️ Failed to change Output Type to Excel: {e}. Assuming it is already Excel.")
 
