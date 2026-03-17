@@ -80,24 +80,30 @@ def _coerce_date(value) -> date:
 
 
 # ---------- Mongo helpers ----------
-def _get_users_collection():
-    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=2000, uuidRepresentation="standard")
-    return client[MONGO_DB][MONGO_COLL]
+_mongo_client_cache: MongoClient | None = None
 
+def _get_mongo_client() -> MongoClient:
+    global _mongo_client_cache
+    if _mongo_client_cache is None:
+        _mongo_client_cache = MongoClient(
+            MONGO_URI,
+            serverSelectionTimeoutMS=2000,
+            uuidRepresentation="standard",
+            maxPoolSize=10,
+        )
+    return _mongo_client_cache
+
+def _get_users_collection():
+    return _get_mongo_client()[MONGO_DB][MONGO_COLL]
 
 def _get_db():
-    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=2000, uuidRepresentation="standard")
-    return client[MONGO_DB]
-
+    return _get_mongo_client()[MONGO_DB]
 
 def _get_pdf_fs():
-    db = _get_db()
-    return gridfs.GridFS(db, collection=PDF_GRIDFS_BUCKET)
-
+    return gridfs.GridFS(_get_db(), collection=PDF_GRIDFS_BUCKET)
 
 def _get_keys_collection():
-    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=2000, uuidRepresentation="standard")
-    col = client[MONGO_DB][KEYS_COLL]
+    col = _get_mongo_client()[MONGO_DB][KEYS_COLL]
     try:
         col.create_index("username", unique=True)
     except Exception:
@@ -986,30 +992,70 @@ async def _download_employee_excel_from_heartland(page: Page, hl_user: str, hl_p
 
     await _heartland_login(page, hl_user, hl_pass, username)
     await _open_employee_id_report_modal(page, username)
+
+    # Wait for the report modal form to fully render before touching dropdowns.
+    # The modal can take anywhere from ~0.5s to 10s+ depending on Heartland load.
+    print("⏳ Waiting for report modal to load…")
+    try:
+        await page.wait_for_selector("mat-form-field", state="visible", timeout=30000)
+        await page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        pass
+    await page.wait_for_timeout(800)   # small extra settle after networkidle
+
     try:
         print("🔽 Output Type: Excel")
         await _select_dropdown_report(r"Output\s*Type", "Excel")
     except Exception as e:
         print(f"⚠️ Failed to change Output Type to Excel: {e}. Assuming it is already Excel.")
 
-    print("▶️ Running Employee id report to capture viewer URL…")
+    print("▶️ Running Employee id report…")
+    excel_path = "heartland_employee_ids.xlsx"
+    report_id_found: list[str] = []
+
+    async def _intercept_checkstatus(response):
+        if "checkstatus" in response.url.lower() and not report_id_found:
+            try:
+                data = await response.json()
+                rid = str(data.get("reportId") or data.get("ReportId") or "").strip()
+                if rid:
+                    report_id_found.append(rid)
+                    print(f"📋 Got reportId from checkstatus: {rid}")
+            except Exception:
+                pass  # first poll may return non-JSON — ignore
+
     async with page.context.expect_page() as popup_info:
         await page.get_by_role("button", name="Run Report").click()
     viewer = await popup_info.value
+    viewer.on("response", _intercept_checkstatus)
 
-    await viewer.wait_for_load_state("networkidle")
-    viewer_url = viewer.url
-    print(f"📎 Captured viewer URL: {viewer_url}")
+    print("⏳ Waiting for checkstatus to return reportId (may take several minutes)…")
+    for _ in range(150):   # up to 5 minutes
+        await viewer.wait_for_timeout(2000)
+        if report_id_found:
+            break
+    else:
+        raise RuntimeError("checkstatus never returned a reportId after 5 minutes.")
 
-    print("⬇️ Re-triggering Excel download from popup page…")
-    async with viewer.expect_download() as dl_info:
-        await viewer.goto(viewer.url)
+    report_id = report_id_found[0]
+    download_url = f"https://www.heartlandpayroll.com/Reports/Viewer/viewpdf?reportId={report_id}&download=true"
+    print(f"⬇️ Fetching {download_url}")
 
-    download = await dl_info.value
-    excel_path = "heartland_employee_ids.xlsx"
-    await download.save_as(excel_path)
-    print(f"✅ Downloaded Employee ID Excel → {excel_path}")
+    cookies = await page.context.cookies()
+    cookie_jar = {c["name"]: c["value"] for c in cookies}
+
+    import httpx
+    async with httpx.AsyncClient(cookies=cookie_jar, timeout=120, follow_redirects=True) as client:
+        r = await client.get(download_url)
+
+    if r.status_code != 200 or len(r.content) < 512:
+        raise RuntimeError(f"viewpdf returned status {r.status_code}, size {len(r.content)} — not a valid Excel file.")
+
+    with open(excel_path, "wb") as f:
+        f.write(r.content)
+    print(f"✅ Downloaded Employee ID Excel → {excel_path} ({len(r.content)} bytes)")
     return excel_path
+
 
 
 def _parse_employee_excel_to_df(excel_path: str) -> pd.DataFrame:
@@ -1114,7 +1160,7 @@ def refresh_employee_keys_from_heartland(username: str) -> dict:
 
         async def _inner():
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True, slow_mo=500)
+                browser = await p.chromium.launch(headless=True, slow_mo=50)
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
                 excel_path = await _download_employee_excel_from_heartland(page, hl_user, hl_pass, username)
@@ -1737,7 +1783,7 @@ def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_en
 
         async def _inner_salondata():
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True, slow_mo=500)
+                browser = await p.chromium.launch(headless=True, slow_mo=50)
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
                 csv_path, _ = await download_salondata_csv(page, sd_user, sd_pass, period_end_date)
@@ -1798,13 +1844,20 @@ def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_en
 
 
 # ---------- Orchestration for Streamlit ----------
-async def _full_agentic_flow_inner(sd_user, sd_pass, hl_user, hl_pass, username, period_end_date=None) -> dict:
+async def _full_agentic_flow_inner(sd_user, sd_pass, hl_user, hl_pass, username, period_end_date=None, csv_path_prefetched=None) -> dict:
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, slow_mo=500)
+        browser = await p.chromium.launch(headless=True, slow_mo=50)
         context = await browser.new_context(accept_downloads=True)
         page = await context.new_page()
 
-        csv_path, period_end = await download_salondata_csv(page, sd_user, sd_pass, period_end_date)
+        if csv_path_prefetched and os.path.exists(csv_path_prefetched):
+            print(f"♻️ Reusing prefetched SalonData CSV → {csv_path_prefetched}")
+            csv_path = csv_path_prefetched
+            # Derive period_end from the date we already know
+            d = _coerce_date(period_end_date) if period_end_date else _default_payroll_friday()
+            period_end = d.strftime("%m/%d/%Y")
+        else:
+            csv_path, period_end = await download_salondata_csv(page, sd_user, sd_pass, period_end_date)
 
         safe_period = re.sub(r"[^0-9A-Za-z]+", "-", (period_end or "").strip()).strip("-")
         if not safe_period:
@@ -1873,7 +1926,11 @@ def run_payroll_for_user(username: str, period_end_date=None) -> dict:
         if os.name == "nt":
             asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-        result = asyncio.run(_full_agentic_flow_inner(sd_user, sd_pass, hl_user, hl_pass, username, period_end_date=period_end_date))
+        result = asyncio.run(_full_agentic_flow_inner(
+            sd_user, sd_pass, hl_user, hl_pass, username,
+            period_end_date=period_end_date,
+            csv_path_prefetched=ready.get("csv_path"),
+        ))
         if isinstance(result, dict) and (result.get("error") or (result.get("ok") is False)):
             raise RuntimeError(result.get("error") or "Payroll failed.")
         _update_payroll_status(username, "completed")
