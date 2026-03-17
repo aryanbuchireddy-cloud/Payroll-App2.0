@@ -19,7 +19,7 @@ PDF_OUTPUT_DIR = os.path.join(os.getcwd(), "payroll_pdfs")
 os.makedirs(PDF_OUTPUT_DIR, exist_ok=True)
 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-MONGO_DB = os.getenv("MONGO_DB", "payrollInfo")
+MONGO_DB = os.getenv("MONGO_DB", "payrollapp")
 MONGO_COLL = "userInfo"
 
 # ---------- GridFS bucket for PDFs ----------
