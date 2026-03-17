@@ -386,10 +386,16 @@ async def download_salondata_csv(
 
     await page.click('text=Select All')
     await page.click('text=Run Report')
-    await page.wait_for_selector('text=Download CSV')
-
-    async with page.expect_download() as download_info:
-        await page.click("text=Download CSV")
+    await page.wait_for_timeout(3000)
+    await page.wait_for_selector('text=Download CSV', timeout=120000)
+    
+    async with page.expect_download(timeout=120000) as download_info:
+        btn = page.get_by_text("Download CSV", exact=False).first
+        await btn.wait_for(state="visible", timeout=60000)
+        await btn.scroll_into_view_if_needed()
+        await page.wait_for_timeout(500)
+        await btn.click(force=True)
+    
     download = await download_info.value
 
     csv_path = "salondata_payroll.csv"
