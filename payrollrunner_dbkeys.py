@@ -940,29 +940,25 @@ async def _open_employee_id_report_modal(page: Page, portal_username: str):
         wait_until="domcontentloaded",
     )
 
-    # Give Angular/MDC time to build the grid
     try:
-        await page.wait_for_load_state("networkidle", timeout=20000)
+        await page.wait_for_load_state("networkidle", timeout=25000)
     except Exception:
         pass
-    await page.wait_for_timeout(2500)
+    await page.wait_for_timeout(3000)
 
     uname = (portal_username or "").strip().lower()
     cfg = HEARTLAND_EMPLOYEEID_REPORT_PICK.get(uname) or {}
     match_text = (cfg.get("match") or "Employee id").strip()
 
-    # Wait for report rows/grid to appear
-    possible_rows = page.locator("tr, .mat-mdc-row, .mat-row, [role='row']")
-    await possible_rows.first.wait_for(state="visible", timeout=45000)
+    # Wait for the actual report title text, not generic rows
+    title_cell = page.get_by_text(_re.compile(rf"{_re.escape(match_text)}", _re.I)).first
+    await title_cell.wait_for(state="visible", timeout=60000)
 
-    # Find the row containing Employee id
-    row = page.locator("tr, .mat-mdc-row, .mat-row, [role='row']").filter(
-        has=page.get_by_text(_re.compile(rf"{_re.escape(match_text)}", _re.I))
+    row = title_cell.locator(
+        "xpath=ancestor::tr[1] | ancestor::*[@role='row'][1] | ancestor::td[1]/parent::*"
     ).first
-
     await row.wait_for(state="visible", timeout=30000)
 
-    # Use selectors that match what your screenshot shows
     eye = row.locator(
         "fa-icon.view, "
         "[id*='customReportWriter-action-cell-view-action'], "
@@ -978,11 +974,11 @@ async def _open_employee_id_report_modal(page: Page, portal_username: str):
     try:
         await eye.click(force=True)
     except Exception:
-        # fallback: click nearest clickable parent
-        clickable = eye.locator("xpath=ancestor::button[1] | ancestor::*[@role='button'][1] | ancestor::td[1]").first
+        clickable = eye.locator(
+            "xpath=ancestor::button[1] | ancestor::*[@role='button'][1] | ancestor::td[1]"
+        ).first
         await clickable.click(force=True)
 
-    # wait for report modal to actually render
     try:
         await page.wait_for_selector("mat-form-field", state="visible", timeout=45000)
         await page.wait_for_load_state("networkidle", timeout=15000)
