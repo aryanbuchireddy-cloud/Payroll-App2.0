@@ -1041,20 +1041,26 @@ async def _download_employee_excel_from_heartland(page: Page, hl_user: str, hl_p
     print("▶️ Running Employee id report…")
     excel_path = "heartland_employee_ids.xlsx"
     report_id_found: list[str] = []
-
+    
     async def _intercept_checkstatus(response):
-        if "checkstatus" in response.url.lower() and not report_id_found:
-            try:
-                data = await response.json()
-                rid = str(data.get("reportId") or data.get("ReportId") or "").strip()
-                if rid:
-                    report_id_found.append(rid)
-                    print(f"📋 Got reportId from checkstatus: {rid}")
-            except Exception:
-                pass  # first poll may return non-JSON — ignore
-
+        url = (response.url or "").lower()
+        if "checkstatus" not in url:
+            return
+        try:
+            data = await response.json()
+        except Exception:
+            return
+    
+        rid = str(data.get("reportId") or data.get("ReportId") or "").strip()
+        if rid and rid not in report_id_found:
+            report_id_found.append(rid)
+            print(f"📋 Got reportId from checkstatus: {rid}")
+    
+    page.context.on("response", _intercept_checkstatus)
+    
     async with page.context.expect_page() as popup_info:
         await page.get_by_role("button", name="Run Report").click()
+    
     viewer = await popup_info.value
     viewer.on("response", _intercept_checkstatus)
 
