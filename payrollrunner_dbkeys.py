@@ -1043,34 +1043,49 @@ async def _download_employee_excel_from_heartland(page: Page, hl_user: str, hl_p
     report_id_found: list[str] = []
     
     async def _intercept_checkstatus(response):
-        url = (response.url or "").lower()
-        if "checkstatus" not in url:
-            return
         try:
+            url = (response.url or "").lower()
+            if "checkstatus" not in url:
+                return
+    
+            ct = (response.headers.get("content-type") or "").lower()
+            if "json" not in ct:
+                return
+    
             data = await response.json()
-        except Exception:
-            return
+            print(f"📡 checkstatus response: {data}")
     
-        rid = str(data.get("reportId") or data.get("ReportId") or "").strip()
-        if rid and rid not in report_id_found:
-            report_id_found.append(rid)
-            print(f"📋 Got reportId from checkstatus: {rid}")
+            rid = str(
+                data.get("reportId")
+                or data.get("ReportId")
+                or data.get("id")
+                or data.get("Id")
+                or ""
+            ).strip()
     
+            if rid and rid not in report_id_found:
+                report_id_found.append(rid)
+                print(f"📋 Got reportId from checkstatus: {rid}")
+        except Exception as e:
+            print(f"⚠️ checkstatus parse skipped: {e}")
+    
+    # attach BEFORE clicking Run Report
     page.context.on("response", _intercept_checkstatus)
     
-    async with page.context.expect_page() as popup_info:
-        await page.get_by_role("button", name="Run Report").click()
+    try:
+        async with page.context.expect_page() as popup_info:
+            await page.get_by_role("button", name="Run Report").click()
+        viewer = await popup_info.value
+    except Exception:
+        viewer = None
     
-    viewer = await popup_info.value
-    viewer.on("response", _intercept_checkstatus)
-
     print("⏳ Waiting for checkstatus to return reportId (may take several minutes)…")
-    for _ in range(150):   # up to 5 minutes
-        await viewer.wait_for_timeout(2000)
+    for _ in range(180):  # 6 minutes
+        await page.wait_for_timeout(2000)
         if report_id_found:
             break
     else:
-        raise RuntimeError("checkstatus never returned a reportId after 5 minutes.")
+        raise RuntimeError("checkstatus never returned a reportId after 6 minutes.")
 
     report_id = report_id_found[0]
     download_url = f"https://www.heartlandpayroll.com/Reports/Viewer/viewpdf?reportId={report_id}&download=true"
