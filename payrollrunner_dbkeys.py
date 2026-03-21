@@ -927,35 +927,67 @@ async def _maybe_select_multi_client(page: Page, username: str) -> None:
 
 # ---------- Heartland "Employee id" custom report → Excel ----------
 async def _open_employee_id_report_modal(page: Page, portal_username: str):
-    await page.goto("https://www.heartlandpayroll.com/Reports/CustomReports/CustomReportWriter")
-    await page.wait_for_timeout(1200)
+    await page.goto(
+        "https://www.heartlandpayroll.com/Reports/CustomReports/CustomReportWriter",
+        wait_until="domcontentloaded",
+    )
+
+    # Wait for the report list to actually render
+    try:
+        await page.wait_for_selector(
+            "payroll-custom-report-writer-actions-cell, fa-icon.view, [id*='customReportWriter-action-cell-view']",
+            state="visible", timeout=30000,
+        )
+    except Exception:
+        pass
+    await page.wait_for_timeout(1000)
 
     uname = (portal_username or "").strip().lower()
     cfg = HEARTLAND_EMPLOYEEID_REPORT_PICK.get(uname) or {}
     match_text = (cfg.get("match") or "").strip()
     pick_index = int(cfg.get("index", 0) or 0)
 
+    # Try by exact id pattern first (most reliable — from DevTools HTML)
+    # id="payroll-reports-customReportWriter-action-cell-view-action"
+    # inside payroll-reports-customReportWriter-actions-cell-{index}
     try:
-        if match_text:
-            locator = page.locator(f"text={match_text}")
-            if await locator.count() > 0:
-                row = locator.first.locator("xpath=ancestor::tr[1]")
-                if await row.count() == 0:
-                    row = locator.first.locator("xpath=ancestor::div[1]")
-
-                view_in_row = row.locator("fa-icon.view, i.fa-eye, i.fa.fa-eye")
-                if await view_in_row.count() > 0:
-                    await view_in_row.first.click()
-                    return
+        cell = page.locator(f"[id*='customReportWriter-actions-cell-{pick_index}']").first
+        if await cell.count() > 0:
+            eye = cell.locator("[id*='view-action'], fa-icon.view, svg.fa-eye").first
+            if await eye.count() > 0:
+                await eye.scroll_into_view_if_needed()
+                await eye.click(force=True)
+                return
     except Exception:
         pass
 
-    icons = page.locator('fa-icon.view, i.fa-eye, i.fa.fa-eye')
+    # Try by match text — find the row containing the report name then click its eye
+    if match_text:
+        try:
+            row_locator = page.locator("tr, [role='row']").filter(
+                has=page.locator(f"text={match_text}")
+            ).first
+            if await row_locator.count() > 0:
+                eye = row_locator.locator(
+                    "[id*='view-action'], fa-icon.view, svg.fa-eye, i.fa-eye"
+                ).first
+                if await eye.count() > 0:
+                    await eye.scroll_into_view_if_needed()
+                    await eye.click(force=True)
+                    return
+        except Exception:
+            pass
+
+    # Final fallback — grab all eye icons and pick by index
+    icons = page.locator(
+        "[id*='customReportWriter-action-cell-view'], fa-icon.view, svg.fa-eye, i.fa-eye"
+    )
     n = await icons.count()
     if n == 0:
-        raise RuntimeError('No view (eye) icons found for Heartland reports list.')
-    pick_index = min(max(pick_index, 0), n - 1)
-    await icons.nth(pick_index).click()
+        raise RuntimeError("No view (eye) icons found on Heartland Custom Reports page.")
+    idx = min(max(pick_index, 0), n - 1)
+    await icons.nth(idx).scroll_into_view_if_needed()
+    await icons.nth(idx).click(force=True)
 
 
 async def _download_employee_excel_from_heartland(page: Page, hl_user: str, hl_pass: str, username: str) -> str:
