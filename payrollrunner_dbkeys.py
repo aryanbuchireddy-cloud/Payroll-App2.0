@@ -19,7 +19,7 @@ PDF_OUTPUT_DIR = os.path.join(os.getcwd(), "payroll_pdfs")
 os.makedirs(PDF_OUTPUT_DIR, exist_ok=True)
 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-MONGO_DB = os.getenv("MONGO_DB", "payrollapp")
+MONGO_DB = os.getenv("MONGO_DB", "payrollInfo")
 MONGO_COLL = "userInfo"
 
 # ---------- GridFS bucket for PDFs ----------
@@ -386,16 +386,10 @@ async def download_salondata_csv(
 
     await page.click('text=Select All')
     await page.click('text=Run Report')
-    await page.wait_for_timeout(3000)
-    await page.wait_for_selector('text=Download CSV', timeout=120000)
-    
-    async with page.expect_download(timeout=120000) as download_info:
-        btn = page.get_by_text("Download CSV", exact=False).first
-        await btn.wait_for(state="visible", timeout=60000)
-        await btn.scroll_into_view_if_needed()
-        await page.wait_for_timeout(500)
-        await btn.click(force=True)
-    
+    await page.wait_for_selector('text=Download CSV')
+
+    async with page.expect_download() as download_info:
+        await page.click("text=Download CSV")
     download = await download_info.value
 
     csv_path = "salondata_payroll.csv"
@@ -933,58 +927,35 @@ async def _maybe_select_multi_client(page: Page, username: str) -> None:
 
 # ---------- Heartland "Employee id" custom report → Excel ----------
 async def _open_employee_id_report_modal(page: Page, portal_username: str):
-    import re as _re
-
-    await page.goto(
-        "https://www.heartlandpayroll.com/Reports/CustomReports/CustomReportWriter",
-        wait_until="domcontentloaded",
-    )
-
-    try:
-        await page.wait_for_load_state("networkidle", timeout=25000)
-    except Exception:
-        pass
-    await page.wait_for_timeout(3000)
+    await page.goto("https://www.heartlandpayroll.com/Reports/CustomReports/CustomReportWriter")
+    await page.wait_for_timeout(1200)
 
     uname = (portal_username or "").strip().lower()
     cfg = HEARTLAND_EMPLOYEEID_REPORT_PICK.get(uname) or {}
-    match_text = (cfg.get("match") or "Employee id").strip()
-
-    # Wait for the actual report title text, not generic rows
-    title_cell = page.get_by_text(_re.compile(rf"{_re.escape(match_text)}", _re.I)).first
-    await title_cell.wait_for(state="visible", timeout=60000)
-
-    row = title_cell.locator(
-        "xpath=ancestor::tr[1] | ancestor::*[@role='row'][1] | ancestor::td[1]/parent::*"
-    ).first
-    await row.wait_for(state="visible", timeout=30000)
-
-    eye = row.locator(
-        "fa-icon.view, "
-        "[id*='customReportWriter-action-cell-view-action'], "
-        "[id$='view-action'], "
-        "svg[data-icon='eye'], "
-        "i.fa-eye, i.fa.fa-eye"
-    ).first
-
-    await eye.wait_for(state="visible", timeout=30000)
-    await eye.scroll_into_view_if_needed()
-    await page.wait_for_timeout(500)
+    match_text = (cfg.get("match") or "").strip()
+    pick_index = int(cfg.get("index", 0) or 0)
 
     try:
-        await eye.click(force=True)
-    except Exception:
-        clickable = eye.locator(
-            "xpath=ancestor::button[1] | ancestor::*[@role='button'][1] | ancestor::td[1]"
-        ).first
-        await clickable.click(force=True)
+        if match_text:
+            locator = page.locator(f"text={match_text}")
+            if await locator.count() > 0:
+                row = locator.first.locator("xpath=ancestor::tr[1]")
+                if await row.count() == 0:
+                    row = locator.first.locator("xpath=ancestor::div[1]")
 
-    try:
-        await page.wait_for_selector("mat-form-field", state="visible", timeout=45000)
-        await page.wait_for_load_state("networkidle", timeout=15000)
+                view_in_row = row.locator("fa-icon.view, i.fa-eye, i.fa.fa-eye")
+                if await view_in_row.count() > 0:
+                    await view_in_row.first.click()
+                    return
     except Exception:
         pass
-    await page.wait_for_timeout(1000)
+
+    icons = page.locator('fa-icon.view, i.fa-eye, i.fa.fa-eye')
+    n = await icons.count()
+    if n == 0:
+        raise RuntimeError('No view (eye) icons found for Heartland reports list.')
+    pick_index = min(max(pick_index, 0), n - 1)
+    await icons.nth(pick_index).click()
 
 
 async def _download_employee_excel_from_heartland(page: Page, hl_user: str, hl_pass: str, username: str) -> str:
@@ -1040,71 +1011,44 @@ async def _download_employee_excel_from_heartland(page: Page, hl_user: str, hl_p
 
     print("▶️ Running Employee id report…")
     excel_path = "heartland_employee_ids.xlsx"
-    report_id_found: list[str] = []
-    
+    excel_bytes_found: list[bytes] = []
+
     async def _intercept_checkstatus(response):
+        if "checkstatus" not in response.url.lower():
+            return
+        if excel_bytes_found:
+            return
         try:
-            url = (response.url or "").lower()
-            if "checkstatus" not in url:
-                return
-    
-            ct = (response.headers.get("content-type") or "").lower()
-            if "json" not in ct:
-                return
-    
             data = await response.json()
-            print(f"📡 checkstatus response: {data}")
-    
-            rid = str(
-                data.get("reportId")
-                or data.get("ReportId")
-                or data.get("id")
-                or data.get("Id")
-                or ""
-            ).strip()
-    
-            if rid and rid not in report_id_found:
-                report_id_found.append(rid)
-                print(f"📋 Got reportId from checkstatus: {rid}")
+            status = str(data.get("Status") or "").strip()
+            report_data = str(data.get("ReportData") or "").strip()
+            print(f"📡 checkstatus status={status}, ReportData={'present' if report_data else 'empty'}")
+            if status == "Completed" and report_data:
+                import base64
+                raw = base64.b64decode(report_data)
+                excel_bytes_found.append(raw)
+                print(f"✅ Got Excel from ReportData ({len(raw)} bytes)")
         except Exception as e:
             print(f"⚠️ checkstatus parse skipped: {e}")
-    
-    # attach BEFORE clicking Run Report
-    page.context.on("response", _intercept_checkstatus)
-    
-    try:
-        async with page.context.expect_page() as popup_info:
-            await page.get_by_role("button", name="Run Report").click()
-        viewer = await popup_info.value
-    except Exception:
-        viewer = None
-    
-    print("⏳ Waiting for checkstatus to return reportId (may take several minutes)…")
-    for _ in range(180):  # 6 minutes
+
+    async with page.context.expect_page() as popup_info:
+        await page.get_by_role("button", name="Run Report").click()
+    viewer = await popup_info.value
+    viewer.on("response", _intercept_checkstatus)
+
+    print("⏳ Waiting for checkstatus to return completed report (may take several minutes)…")
+    for _ in range(180):   # up to 6 minutes
         await page.wait_for_timeout(2000)
-        if report_id_found:
+        if excel_bytes_found:
             break
     else:
-        raise RuntimeError("checkstatus never returned a reportId after 6 minutes.")
-
-    report_id = report_id_found[0]
-    download_url = f"https://www.heartlandpayroll.com/Reports/Viewer/viewpdf?reportId={report_id}&download=true"
-    print(f"⬇️ Fetching {download_url}")
-
-    cookies = await page.context.cookies()
-    cookie_jar = {c["name"]: c["value"] for c in cookies}
-
-    import httpx
-    async with httpx.AsyncClient(cookies=cookie_jar, timeout=120, follow_redirects=True) as client:
-        r = await client.get(download_url)
-
-    if r.status_code != 200 or len(r.content) < 512:
-        raise RuntimeError(f"viewpdf returned status {r.status_code}, size {len(r.content)} — not a valid Excel file.")
+        raise RuntimeError("checkstatus never returned a completed report after 6 minutes.")
 
     with open(excel_path, "wb") as f:
-        f.write(r.content)
-    print(f"✅ Downloaded Employee ID Excel → {excel_path} ({len(r.content)} bytes)")
+        f.write(excel_bytes_found[0])
+    print(f"✅ Saved Excel → {excel_path} ({len(excel_bytes_found[0])} bytes)")
     return excel_path
+
 
 
 
