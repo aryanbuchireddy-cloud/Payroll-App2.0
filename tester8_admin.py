@@ -1404,8 +1404,9 @@ ss["_last_bg_running"] = _bg_running
 if _thread_just_died:
     st.rerun()
 elif _bg_running:
-    if st_autorefresh is not None:
-        st_autorefresh(interval=2500, limit=None, key="bg_autorefresh")
-    else:
-        time.sleep(2)
-        st.rerun()
+    # Use a hidden HTML meta-refresh instead of st_autorefresh to avoid
+    # the phantom widget that appears at the bottom of the page.
+    st.markdown(
+        '<meta http-equiv="refresh" content="3">',
+        unsafe_allow_html=True,
+    )
