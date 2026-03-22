@@ -961,14 +961,31 @@ st.caption(
 st.divider()
 
 # ── Extra session state flags ─────────────────────────────────────────────────
-# mfa_active:      True only while payroll is actively running (enables MFA section)
-# mfa_submitted:   True after Submit MFA clicked; stays True until payroll ends
-# payroll_done:    True after payroll completes/fails this session (locks Execute button)
 ss.setdefault("mfa_active",    False)
 ss.setdefault("mfa_submitted", False)
 ss.setdefault("payroll_done",  False)
-ss.setdefault("mfa_thank_you", False)   # True for one render after Submit MFA
+ss.setdefault("mfa_thank_you", False)
 ss.setdefault("notify_msg",    ("info", "Click **Check Payroll Readiness** first, then **Execute Payroll**.", ""))
+
+# ── Auto-refresh at the TOP — fires before any widgets render so it can't
+#    cause a partial double-render of widgets lower on the page.
+_rt_early = ss.get("readiness_thread", None)
+_pt_early = ss.get("payroll_thread",   None)
+_bg_running_early = (
+    (_rt_early is not None and _rt_early.is_alive())
+    or (_pt_early is not None and _pt_early.is_alive())
+)
+_thread_just_died = ss.get("_last_bg_running", False) and not _bg_running_early
+ss["_last_bg_running"] = _bg_running_early
+
+if _thread_just_died:
+    st.rerun()
+elif _bg_running_early:
+    if st_autorefresh is not None:
+        st_autorefresh(interval=2500, limit=None, key="bg_autorefresh")
+    else:
+        time.sleep(2)
+        st.rerun()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1391,32 +1408,6 @@ with st.expander("🔑 Update passwords", expanded=False):
                     st.error("Update failed — Heartland must be configured first.")
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  AUTO-REFRESH (background polling — no layout shift)
-#  Uses st_autorefresh which fires from the browser AFTER the page has fully
-#  rendered, so buttons/layout never jump mid-draw.
-#  Only active while a background thread is alive.
-# ═════════════════════════════════════════════════════════════════════════════
-_rt = ss.get("readiness_thread", None)
-_pt = ss.get("payroll_thread",   None)
-_bg_running = (
-    (_rt is not None and _rt.is_alive())
-    or (_pt is not None and _pt.is_alive())
-)
-
-# When a thread just died this render, _notify() stored the final
-# error/success message in ss.notify_msg — but autorefresh stopped so
-# nothing would ever render it. Force one extra rerun to show it.
-_thread_just_died = (
-    ss.get("_last_bg_running", False) and not _bg_running
-)
-ss["_last_bg_running"] = _bg_running
-
-if _thread_just_died:
-    st.rerun()
-elif _bg_running:
-    if st_autorefresh is not None:
-        st_autorefresh(interval=2500, limit=None, key="bg_autorefresh")
-    else:
-        time.sleep(2)
-        st.rerun()
+# ═══════════════════════════════════════════════════════════════════════════════
+#  (auto-refresh is handled at the top of the main page)
+# ═══════════════════════════════════════════════════════════════════════════════
