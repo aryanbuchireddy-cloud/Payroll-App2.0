@@ -967,26 +967,6 @@ ss.setdefault("payroll_done",  False)
 ss.setdefault("mfa_thank_you", False)
 ss.setdefault("notify_msg",    ("info", "Click **Check Payroll Readiness** first, then **Execute Payroll**.", ""))
 
-# ── Auto-refresh at the TOP — fires before any widgets render so it can't
-#    cause a partial double-render of widgets lower on the page.
-_rt_early = ss.get("readiness_thread", None)
-_pt_early = ss.get("payroll_thread",   None)
-_bg_running_early = (
-    (_rt_early is not None and _rt_early.is_alive())
-    or (_pt_early is not None and _pt_early.is_alive())
-)
-_thread_just_died = ss.get("_last_bg_running", False) and not _bg_running_early
-ss["_last_bg_running"] = _bg_running_early
-
-if _thread_just_died:
-    st.rerun()
-elif _bg_running_early:
-    if st_autorefresh is not None:
-        st_autorefresh(interval=2500, limit=None, key="bg_autorefresh")
-    else:
-        time.sleep(2)
-        st.rerun()
-
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  1 ▸ PERIOD END DATE
@@ -1408,6 +1388,24 @@ with st.expander("🔑 Update passwords", expanded=False):
                     st.error("Update failed — Heartland must be configured first.")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  (auto-refresh is handled at the top of the main page)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════
+#  AUTO-REFRESH (background polling)
+# ═════════════════════════════════════════════════════════════════════════════
+_rt = ss.get("readiness_thread", None)
+_pt = ss.get("payroll_thread",   None)
+_bg_running = (
+    (_rt is not None and _rt.is_alive())
+    or (_pt is not None and _pt.is_alive())
+)
+
+_thread_just_died = ss.get("_last_bg_running", False) and not _bg_running
+ss["_last_bg_running"] = _bg_running
+
+if _thread_just_died:
+    st.rerun()
+elif _bg_running:
+    if st_autorefresh is not None:
+        st_autorefresh(interval=2500, limit=None, key="bg_autorefresh")
+    else:
+        time.sleep(2)
+        st.rerun()
