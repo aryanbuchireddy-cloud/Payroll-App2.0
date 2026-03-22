@@ -48,7 +48,7 @@ def _get_payroll_enc_key() -> str:
         "PAYROLL_ENC_KEY is missing. Add it to Streamlit secrets or set it as an environment variable."
     )
 
-PAYROLL_ENC_KEY = 'Y7-Dsht3fzSZ3b9RiuxpYgIqnPefA30nNB6s84iQCoA='
+PAYROLL_ENC_KEY = _get_payroll_enc_key()
 
 try:
     Fernet(PAYROLL_ENC_KEY.encode("utf-8"))
@@ -197,22 +197,49 @@ def _friendly_error(err: str | None) -> str:
     first_line = msg.splitlines()[0].strip()
     low        = msg.lower()
 
-    if "missing salondata credentials" in low:
+    if "missing salondata credentials" in low or "missing salondata" in low:
         return "SalonData is not connected. Complete Setup with your SalonData username and password."
-    if "missing heartland credentials" in low:
+    if "missing heartland credentials" in low or "missing heartland" in low:
         return "Heartland is not connected. Complete Setup with your Heartland username and password."
     if "salondata" in low and ("invalid" in low or "incorrect" in low) and "password" in low:
         return "SalonData login failed — incorrect password. Update your SalonData password and try again."
     if "heartland" in low and ("invalid" in low or "incorrect" in low) and "password" in low:
         return "Heartland login failed — incorrect password. Update your Heartland password and try again."
-    if "mfa" in low and ("code" in low or "otp" in low):
+    if "mfa" in low and ("code" in low or "otp" in low or "required" in low):
         return "Waiting for Heartland MFA. Enter the code below and click Submit MFA."
+    if "mfa" in low and "timeout" in low:
+        return "MFA timed out — no code was entered in time. Please try again."
     if "employee" in low and "report" in low:
         return "Could not download the Heartland Employee ID report. Contact admin to confirm the report selection."
     if "pdf" in low and ("not found" in low or "missing" in low or "load" in low):
         return "A required PDF/report could not be loaded. Try again or contact admin."
+    if "timeout" in low or "timed out" in low:
+        return "The request timed out — the site may be slow or your password may have changed. Please try again."
+    if "network" in low or "connection" in low or "unreachable" in low:
+        return "A network error occurred. Check your internet connection and try again."
+    if "checkstatus" in low or "reportdata" in low or "viewpdf" in low:
+        return "Could not retrieve the Heartland employee report. Please try again."
+    if "missing keys" in low or "missing heartland keys" in low:
+        return "Some employees are missing Heartland keys. Run Check Payroll Readiness to sync them."
+    if "payroll is not ready" in low:
+        return "Payroll is not ready. Run Check Payroll Readiness first."
+    if "file successfully imported" in low:
+        return "Payroll successfully uploaded to Heartland."
+    if "time card import failed" in low:
+        return "Heartland time card import failed. Please try again or contact admin."
+    if "formatting returned none" in low:
+        return "Could not format the payroll file. Please try again or contact admin."
 
-    return first_line[:220]
+    # Fallback: never show a raw Python traceback or exception class to the user
+    # Strip common technical prefixes so the message is readable
+    clean = first_line
+    for prefix in ("RuntimeError:", "ValueError:", "Exception:", "Error:", "TimeoutError:", "PlaywrightTimeoutError:"):
+        if clean.lower().startswith(prefix.lower()):
+            clean = clean[len(prefix):].strip()
+    # If what's left still looks like code (has colons, brackets, etc.), replace entirely
+    if any(c in clean for c in ("Traceback", "File \"", "line ", "  at ", "assert ")):
+        return "An unexpected error occurred. Please try again or contact admin."
+    return clean[:220] if clean else "Something went wrong. Please try again."
 
 def _safe_check_payroll_ready(username: str, *, dry_run: bool) -> dict:
     try:
@@ -1032,6 +1059,7 @@ run_disabled    = (
     or payroll_running
     or ss.payroll_done
     or not is_valid_friday
+    or (readiness_running and r_state == "syncing_keys")
 )
 
 c1, c2 = st.columns(2)
@@ -1269,7 +1297,7 @@ mfa_submit_disabled = not (ss.mfa_active or (r_state == "syncing_keys" and readi
 mfa_col1, mfa_col2 = st.columns([3, 1])
 with mfa_col1:
     mfa_code_input = st.text_input(
-        "MFA code", placeholder="Enter 6-digit code after clicking Execute Payroll",
+        "MFA code", placeholder="Enter 6-digit code when prompted",
         label_visibility="collapsed", key="mfa_code_input",
         disabled=mfa_input_disabled,
     )
@@ -1284,6 +1312,7 @@ with mfa_col2:
             users.update_one({"username": ss.auth_user}, {"$set": {"mfa_code": mfa_code_input.strip()}})
             ss.mfa_submitted = True
             ss.mfa_thank_you = True
+            ss["mfa_code_input"] = ""   # clear the input field
             st.rerun()
         else:
             st.error("Please enter the MFA code.")
@@ -1375,10 +1404,19 @@ _bg_running = (
     or (_pt is not None and _pt.is_alive())
 )
 
-if _bg_running:
+# When a thread just died this render, _notify() stored the final
+# error/success message in ss.notify_msg — but autorefresh stopped so
+# nothing would ever render it. Force one extra rerun to show it.
+_thread_just_died = (
+    ss.get("_last_bg_running", False) and not _bg_running
+)
+ss["_last_bg_running"] = _bg_running
+
+if _thread_just_died:
+    st.rerun()
+elif _bg_running:
     if st_autorefresh is not None:
         st_autorefresh(interval=2500, limit=None, key="bg_autorefresh")
     else:
-        # Fallback if streamlit-autorefresh is not installed
         time.sleep(2)
         st.rerun()
