@@ -1401,15 +1401,6 @@ _bg_running = (
 _thread_just_died = ss.get("_last_bg_running", False) and not _bg_running
 ss["_last_bg_running"] = _bg_running
 
-if _thread_just_died:
+if _thread_just_died or _bg_running:
+    time.sleep(2.5)
     st.rerun()
-elif _bg_running:
-    if st_autorefresh is not None:
-        # Render inside a zero-height container so the component
-        # occupies no visible space and can't bleed into adjacent widgets
-        _ar_slot = st.empty()
-        with _ar_slot:
-            st_autorefresh(interval=2500, limit=None, key="bg_autorefresh")
-    else:
-        time.sleep(2)
-        st.rerun()
