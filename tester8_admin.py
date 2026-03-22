@@ -48,7 +48,7 @@ def _get_payroll_enc_key() -> str:
         "PAYROLL_ENC_KEY is missing. Add it to Streamlit secrets or set it as an environment variable."
     )
 
-PAYROLL_ENC_KEY = _get_payroll_enc_key()
+PAYROLL_ENC_KEY = 'Y7-Dsht3fzSZ3b9RiuxpYgIqnPefA30nNB6s84iQCoA='
 
 try:
     Fernet(PAYROLL_ENC_KEY.encode("utf-8"))
@@ -1032,7 +1032,6 @@ run_disabled    = (
     or payroll_running
     or ss.payroll_done
     or not is_valid_friday
-    or (readiness_running and r_state == "syncing_keys")
 )
 
 c1, c2 = st.columns(2)
@@ -1270,7 +1269,7 @@ mfa_submit_disabled = not (ss.mfa_active or (r_state == "syncing_keys" and readi
 mfa_col1, mfa_col2 = st.columns([3, 1])
 with mfa_col1:
     mfa_code_input = st.text_input(
-        "MFA code", placeholder="Enter 6-digit code when prompted",
+        "MFA code", placeholder="Enter 6-digit code after clicking Execute Payroll",
         label_visibility="collapsed", key="mfa_code_input",
         disabled=mfa_input_disabled,
     )
@@ -1285,7 +1284,6 @@ with mfa_col2:
             users.update_one({"username": ss.auth_user}, {"$set": {"mfa_code": mfa_code_input.strip()}})
             ss.mfa_submitted = True
             ss.mfa_thank_you = True
-            ss["mfa_code_input"] = ""   # clear the input field
             st.rerun()
         else:
             st.error("Please enter the MFA code.")
@@ -1377,19 +1375,10 @@ _bg_running = (
     or (_pt is not None and _pt.is_alive())
 )
 
-# When a thread just died this render, _notify() stored the final
-# error/success message in ss.notify_msg — but autorefresh stopped so
-# nothing would ever render it. Force one extra rerun to show it.
-_thread_just_died = (
-    ss.get("_last_bg_running", False) and not _bg_running
-)
-ss["_last_bg_running"] = _bg_running
-
-if _thread_just_died:
-    st.rerun()
-elif _bg_running:
+if _bg_running:
     if st_autorefresh is not None:
         st_autorefresh(interval=2500, limit=None, key="bg_autorefresh")
     else:
+        # Fallback if streamlit-autorefresh is not installed
         time.sleep(2)
         st.rerun()
