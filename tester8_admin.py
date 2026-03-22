@@ -967,6 +967,11 @@ ss.setdefault("payroll_done",  False)
 ss.setdefault("mfa_thank_you", False)
 ss.setdefault("notify_msg",    ("info", "Click **Check Payroll Readiness** first, then **Execute Payroll**.", ""))
 
+# Clear MFA input if flagged from previous render (must happen before widget is instantiated)
+if ss.get("_clear_mfa_input"):
+    ss["mfa_code_input"] = ""
+    ss["_clear_mfa_input"] = False
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  1 ▸ PERIOD END DATE
@@ -1309,7 +1314,7 @@ with mfa_col2:
             users.update_one({"username": ss.auth_user}, {"$set": {"mfa_code": mfa_code_input.strip()}})
             ss.mfa_submitted = True
             ss.mfa_thank_you = True
-            ss["mfa_code_input"] = ""   # clear the input field
+            ss["_clear_mfa_input"] = True   # cleared before widget renders on next rerun
             st.rerun()
         else:
             st.error("Please enter the MFA code.")
