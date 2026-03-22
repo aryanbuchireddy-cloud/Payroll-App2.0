@@ -1055,10 +1055,11 @@ st.subheader("▶️ Actions")
 #   Check Readiness  → disabled only while readiness check is actively running
 #   Execute Payroll  → disabled if: not ready, payroll running, OR already done this session
 is_ready        = (r_state == "ready")
-check_disabled  = (readiness_running or not is_valid_friday)
+_anything_running = readiness_running or payroll_running
+check_disabled  = (_anything_running or not is_valid_friday)
 run_disabled    = (
     not is_ready
-    or payroll_running
+    or _anything_running
     or ss.payroll_done
     or not is_valid_friday
     or (readiness_running and r_state == "syncing_keys")
@@ -1204,9 +1205,42 @@ else:
 
 st.divider()
 
+# ═════════════════════════════════════════════════════════════════════════════
+#  3 ▸ HEARTLAND MFA  (directly under Actions)
+# ═════════════════════════════════════════════════════════════════════════════
+st.subheader("🔐 Heartland MFA")
+
+mfa_input_disabled  = not (ss.mfa_active or (r_state == "syncing_keys" and readiness_running))
+mfa_submit_disabled = not (ss.mfa_active or (r_state == "syncing_keys" and readiness_running)) or ss.mfa_submitted
+
+mfa_col1, mfa_col2 = st.columns([3, 1])
+with mfa_col1:
+    mfa_code_input = st.text_input(
+        "MFA code", placeholder="Enter 6-digit code when prompted",
+        label_visibility="collapsed", key="mfa_code_input",
+        disabled=mfa_input_disabled,
+    )
+with mfa_col2:
+    if st.button(
+        "Submit MFA",
+        use_container_width=True,
+        key="btn_submit_mfa",
+        disabled=mfa_submit_disabled,
+    ):
+        if mfa_code_input.strip():
+            users.update_one({"username": ss.auth_user}, {"$set": {"mfa_code": mfa_code_input.strip()}})
+            ss.mfa_submitted = True
+            ss.mfa_thank_you = True
+            ss["_clear_mfa_input"] = True
+            st.rerun()
+        else:
+            st.error("Please enter the MFA code.")
+
+st.divider()
+
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  3 ▸ PAYROLL VALIDATION FILE
+#  4 ▸ PAYROLL VALIDATION FILE
 # ═════════════════════════════════════════════════════════════════════════════
 st.subheader("📄 Payroll Validation File")
 
@@ -1277,47 +1311,12 @@ if options:
             file_name=download_name,
             mime="application/pdf",
             use_container_width=True,
+            disabled=_anything_running,
         )
     else:
         st.error(f"Could not load file. {cache.get('source_msg', '')}")
 else:
     st.info("No Payroll Validation File yet. Run payroll above to generate one.")
-
-st.divider()
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  4 ▸ HEARTLAND MFA
-#  Only active after Execute Payroll is clicked; locked after Submit MFA
-#  until the payroll run ends.
-# ═════════════════════════════════════════════════════════════════════════════
-st.subheader("🔐 Heartland MFA")
-
-mfa_input_disabled  = not (ss.mfa_active or (r_state == "syncing_keys" and readiness_running))
-mfa_submit_disabled = not (ss.mfa_active or (r_state == "syncing_keys" and readiness_running)) or ss.mfa_submitted
-
-mfa_col1, mfa_col2 = st.columns([3, 1])
-with mfa_col1:
-    mfa_code_input = st.text_input(
-        "MFA code", placeholder="Enter 6-digit code when prompted",
-        label_visibility="collapsed", key="mfa_code_input",
-        disabled=mfa_input_disabled,
-    )
-with mfa_col2:
-    if st.button(
-        "Submit MFA",
-        use_container_width=True,
-        key="btn_submit_mfa",
-        disabled=mfa_submit_disabled,
-    ):
-        if mfa_code_input.strip():
-            users.update_one({"username": ss.auth_user}, {"$set": {"mfa_code": mfa_code_input.strip()}})
-            ss.mfa_submitted = True
-            ss.mfa_thank_you = True
-            ss["_clear_mfa_input"] = True   # cleared before widget renders on next rerun
-            st.rerun()
-        else:
-            st.error("Please enter the MFA code.")
 
 st.divider()
 
@@ -1338,7 +1337,7 @@ with st.expander("🔑 Update passwords", expanded=False):
         st.write("")
         st.write("")
         st.write("")
-        if st.button("Update portal password", use_container_width=True, key="pwupd_portal_btn"):
+        if st.button("Update portal password", use_container_width=True, key="pwupd_portal_btn", disabled=_anything_running):
             if not portal_cur.strip() or not portal_pw1.strip() or not portal_pw2.strip():
                 st.error("Please fill in all three fields.")
             elif portal_pw1 != portal_pw2:
@@ -1362,7 +1361,7 @@ with st.expander("🔑 Update passwords", expanded=False):
         st.markdown("**SalonData**")
         sd_pw1 = st.text_input("New password",     type="password", key="pwupd_sd_1")
         sd_pw2 = st.text_input("Confirm password", type="password", key="pwupd_sd_2")
-        if st.button("Update SalonData password", use_container_width=True, key="pwupd_sd_btn"):
+        if st.button("Update SalonData password", use_container_width=True, key="pwupd_sd_btn", disabled=_anything_running):
             if not sd_pw1.strip() or not sd_pw2.strip():
                 st.error("Enter and confirm the new password.")
             elif sd_pw1 != sd_pw2:
@@ -1379,7 +1378,7 @@ with st.expander("🔑 Update passwords", expanded=False):
         st.markdown("**Heartland**")
         hl_pw1 = st.text_input("New password",     type="password", key="pwupd_hl_1")
         hl_pw2 = st.text_input("Confirm password", type="password", key="pwupd_hl_2")
-        if st.button("Update Heartland password", use_container_width=True, key="pwupd_hl_btn"):
+        if st.button("Update Heartland password", use_container_width=True, key="pwupd_hl_btn", disabled=_anything_running):
             if not hl_pw1.strip() or not hl_pw2.strip():
                 st.error("Enter and confirm the new password.")
             elif hl_pw1 != hl_pw2:
