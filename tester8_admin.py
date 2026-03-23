@@ -22,9 +22,18 @@ import subprocess, sys
 
 # ── Playwright ────────────────────────────────────────────────────────────────
 def ensure_chromium():
+    # On Streamlit Cloud, chromium is installed via packages.txt (apt).
+    # We just need to install the playwright browser drivers that point to it.
+    # This avoids downloading 153MB of Chromium on every cold start.
     if os.environ.get("PLAYWRIGHT_BROWSERS_INSTALLED") == "1":
         return
     try:
+        # Try using system chromium first (installed via apt in packages.txt)
+        import shutil
+        if shutil.which("chromium") or shutil.which("chromium-browser"):
+            os.environ["PLAYWRIGHT_BROWSERS_INSTALLED"] = "1"
+            return
+        # Fallback: download via playwright
         subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
         os.environ["PLAYWRIGHT_BROWSERS_INSTALLED"] = "1"
     except Exception as e:
