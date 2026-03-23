@@ -338,18 +338,37 @@ def _friendly_error_message(err) -> str:
         return "SalonData is not connected for this portal account. Please go to Setup and save your SalonData username/password."
     if "missing heartland credentials" in s_low or "missing heartland" in s_low:
         return "Heartland is not connected for this portal account. Please go to Setup and save your Heartland username/password."
-    if "timeout" in s_low:
-        return "The website took too long to respond. This is usually a wrong password, a site outage, or a slow connection. Please try again (and update your password if it recently changed)."
     if "mfa" in s_low and ("missing" in s_low or "not found" in s_low):
         return "Heartland MFA code is required. Please enter the 6-digit code and try again."
+    if "mfa" in s_low and "timeout" in s_low:
+        return "MFA timed out — no code was entered in time. Please try again."
+    if "timeout" in s_low or "timed out" in s_low:
+        return "The website took too long to respond. This is usually a wrong password, a site outage, or a slow connection. Please try again."
     if "no view" in s_low and ("icon" in s_low or "icons" in s_low):
-        return "Could not find the Employee ID report in Heartland. Please confirm the report name (or update the report picker)."
+        return "Could not find the Employee ID report in Heartland. Please confirm the report name."
     if "could not find" in s_low and "employee" in s_low and "key" in s_low:
-        return "Employee ID report format changed in Heartland (could not find the expected columns)."
+        return "Employee ID report format changed in Heartland — could not find the expected columns."
     if ("pdf" in s_low and "not found" in s_low) or ("filenotfounderror" in s_low):
-        return "Payroll PDF could not be generated or found. Please run again, and contact support if it keeps happening."
+        return "Payroll PDF could not be generated or found. Please run again, or contact admin."
+    if "checkstatus" in s_low or "reportdata" in s_low:
+        return "Could not retrieve the Heartland employee report. Please try again."
+    if "time card import failed" in s_low:
+        return "Heartland time card import failed. Please try again or contact admin."
+    if "formatting returned none" in s_low:
+        return "Could not format the payroll file. Please try again or contact admin."
+    if "network" in s_low or "connection" in s_low or "unreachable" in s_low:
+        return "A network error occurred. Check your connection and try again."
+    if "payroll is not ready" in s_low:
+        return "Payroll is not ready. Run Check Payroll Readiness first."
 
-    return s
+    # Never expose raw tracebacks or exception class names to the user
+    first_line = s.splitlines()[0].strip()
+    for prefix in ("RuntimeError:", "ValueError:", "Exception:", "Error:", "TimeoutError:", "PlaywrightTimeoutError:"):
+        if first_line.lower().startswith(prefix.lower()):
+            first_line = first_line[len(prefix):].strip()
+    if any(c in first_line for c in ("Traceback", "File \"", "  at ", "assert ")):
+        return "An unexpected error occurred. Please try again or contact admin."
+    return first_line[:220] if first_line else "Something went wrong. Please try again."
 
 
 # ---------- SalonData download ----------
@@ -1186,7 +1205,12 @@ def refresh_employee_keys_from_heartland(username: str) -> dict:
 
         async def _inner():
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True, slow_mo=50)
+                import shutil as _shutil
+                _chromium_path = _shutil.which("chromium") or _shutil.which("chromium-browser")
+                _launch_kwargs = {"headless": True, "slow_mo": 50}
+                if _chromium_path:
+                    _launch_kwargs["executable_path"] = _chromium_path
+                browser = await p.chromium.launch(**_launch_kwargs)
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
                 excel_path = await _download_employee_excel_from_heartland(page, hl_user, hl_pass, username)
@@ -1809,7 +1833,12 @@ def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_en
 
         async def _inner_salondata():
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True, slow_mo=50)
+                import shutil as _shutil
+                _chromium_path = _shutil.which("chromium") or _shutil.which("chromium-browser")
+                _launch_kwargs = {"headless": True, "slow_mo": 50}
+                if _chromium_path:
+                    _launch_kwargs["executable_path"] = _chromium_path
+                browser = await p.chromium.launch(**_launch_kwargs)
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
                 csv_path, _ = await download_salondata_csv(page, sd_user, sd_pass, period_end_date)
@@ -1872,7 +1901,12 @@ def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_en
 # ---------- Orchestration for Streamlit ----------
 async def _full_agentic_flow_inner(sd_user, sd_pass, hl_user, hl_pass, username, period_end_date=None, csv_path_prefetched=None) -> dict:
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, slow_mo=50)
+        import shutil as _shutil
+                _chromium_path = _shutil.which("chromium") or _shutil.which("chromium-browser")
+                _launch_kwargs = {"headless": True, "slow_mo": 50}
+                if _chromium_path:
+                    _launch_kwargs["executable_path"] = _chromium_path
+                browser = await p.chromium.launch(**_launch_kwargs)
         context = await browser.new_context(accept_downloads=True)
         page = await context.new_page()
 
@@ -1974,3 +2008,4 @@ if __name__ == "__main__":
     u = input("Portal username to run payroll for: ").strip()
     info = run_payroll_for_user(u)
     print("Run complete:", info)
+# (no-op append to force file update)
