@@ -16,3 +16,5 @@ libxkbcommon0
 libgtk-3-0
 libxshmfence1
 fonts-liberation
+chromium
+chromium-driver
