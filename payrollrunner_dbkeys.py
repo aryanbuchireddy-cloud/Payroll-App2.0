@@ -828,7 +828,7 @@ async def _heartland_login(page: Page, hl_user: str, hl_pass: str, username: str
     await _maybe_select_multi_account(page, username)
     await _maybe_select_multi_client(page, username)
 
-    await page.wait_for_selector(r"text=/\b(?:Welcome|General)\b/i", timeout=300000)
+    await page.wait_for_url(lambda u: "/Clients/General" in u or "/Dashboard" in u, timeout=60_000)
     print("✅ Welcome page loaded.")
 
 
