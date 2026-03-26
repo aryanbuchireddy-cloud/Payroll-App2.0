@@ -1896,7 +1896,7 @@ def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_en
 async def _full_agentic_flow_inner(sd_user, sd_pass, hl_user, hl_pass, username, period_end_date=None, csv_path_prefetched=None) -> dict:
     async with async_playwright() as p:
         _sys_chromium = __import__('shutil').which('chromium') or __import__('shutil').which('chromium-browser')
-                browser = await p.chromium.launch(headless=True, slow_mo=50, **({'executable_path': _sys_chromium} if _sys_chromium else {}))
+        browser = await p.chromium.launch(headless=True, slow_mo=50, **({'executable_path': _sys_chromium} if _sys_chromium else {}))
         context = await browser.new_context(accept_downloads=True)
         page = await context.new_page()
 
