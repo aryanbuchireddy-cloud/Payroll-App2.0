@@ -1205,7 +1205,7 @@ def refresh_employee_keys_from_heartland(username: str) -> dict:
 
         async def _inner():
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True, slow_mo=50)
+                browser = await p.chromium.launch(headless=False, slow_mo=50)
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
                 excel_path = await _download_employee_excel_from_heartland(page, hl_user, hl_pass, username)
@@ -1828,7 +1828,7 @@ def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_en
 
         async def _inner_salondata():
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True, slow_mo=50)
+                browser = await p.chromium.launch(headless=False, slow_mo=50)
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
                 csv_path, _ = await download_salondata_csv(page, sd_user, sd_pass, period_end_date)
@@ -1891,7 +1891,7 @@ def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_en
 # ---------- Orchestration for Streamlit ----------
 async def _full_agentic_flow_inner(sd_user, sd_pass, hl_user, hl_pass, username, period_end_date=None, csv_path_prefetched=None) -> dict:
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, slow_mo=50)
+        browser = await p.chromium.launch(headless=False, slow_mo=50)
         context = await browser.new_context(accept_downloads=True)
         page = await context.new_page()
 
