@@ -45,7 +45,7 @@ HEARTLAND_MULTIACCOUNT_PICK = {
 }
 HEARTLAND_EMPLOYEEID_REPORT_PICK={
     "quopayroll@gmail.com" : {"match": "Employee id", "index":1},
-    "owner@example.com" : {"match": "Employee id", "index":0},
+    "owner@example.com" : {"match": "Employee id", "index":1},
 }
 
 # ---------- General helpers / regex ----------
