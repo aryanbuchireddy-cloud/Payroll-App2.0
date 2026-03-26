@@ -45,7 +45,7 @@ HEARTLAND_MULTIACCOUNT_PICK = {
 }
 HEARTLAND_EMPLOYEEID_REPORT_PICK={
     "quopayroll@gmail.com" : {"match": "Employee id", "index":1},
-    "owner@example.com" : {"match": "Employee id", "index":1},
+    "owner@example.com" : {"match": "Employee id", "index":0},
 }
 
 # ---------- General helpers / regex ----------
@@ -828,7 +828,7 @@ async def _heartland_login(page: Page, hl_user: str, hl_pass: str, username: str
     await _maybe_select_multi_account(page, username)
     await _maybe_select_multi_client(page, username)
 
-    await page.wait_for_url(lambda u: "/Clients/General" in u or "/Dashboard" in u, timeout=60_000)
+    await page.wait_for_selector(r"text=/\b(?:Welcome|General)\b/i", timeout=300000)
     print("✅ Welcome page loaded.")
 
 
@@ -951,36 +951,30 @@ async def _open_employee_id_report_modal(page: Page, portal_username: str):
         wait_until="domcontentloaded",
     )
 
-    # Wait for the report list to actually render
-    try:
-        await page.wait_for_selector(
-            "payroll-custom-report-writer-actions-cell, fa-icon.view, [id*='customReportWriter-action-cell-view']",
-            state="visible", timeout=30000,
-        )
-    except Exception:
-        pass
-    await page.wait_for_timeout(1000)
-
     uname = (portal_username or "").strip().lower()
     cfg = HEARTLAND_EMPLOYEEID_REPORT_PICK.get(uname) or {}
     match_text = (cfg.get("match") or "").strip()
     pick_index = int(cfg.get("index", 0) or 0)
 
-    # Try by exact id pattern first (most reliable — from DevTools HTML)
-    # id="payroll-reports-customReportWriter-action-cell-view-action"
-    # inside payroll-reports-customReportWriter-actions-cell-{index}
-    try:
-        cell = page.locator(f"[id*='customReportWriter-actions-cell-{pick_index}']").first
-        if await cell.count() > 0:
-            eye = cell.locator("[id*='view-action'], fa-icon.view, svg.fa-eye").first
-            if await eye.count() > 0:
-                await eye.scroll_into_view_if_needed()
-                await eye.click(force=True)
-                return
-    except Exception:
-        pass
+    # Wait specifically for the eye icons to appear in the table — not just the page shell.
+    # Poll up to 60 seconds so slow Heartland loads don't fail.
+    print("⏳ Waiting for Custom Reports table to load…")
+    eye_selector = "fa-icon.view, [id*='customReportWriter-action-cell-view'], svg.fa-eye, i.fa-eye"
+    for _ in range(30):
+        await page.wait_for_timeout(2000)
+        try:
+            n = await page.locator(eye_selector).count()
+            if n > 0:
+                print(f"✅ Found {n} eye icon(s) on Custom Reports page")
+                break
+        except Exception:
+            pass
+    else:
+        raise RuntimeError("No view (eye) icons found on Heartland Custom Reports page after 60s.")
 
-    # Try by match text — find the row containing the report name then click its eye
+    await page.wait_for_timeout(500)
+
+    # Try by match text first — finds the correct row regardless of position
     if match_text:
         try:
             row_locator = page.locator("tr, [role='row']").filter(
@@ -997,13 +991,21 @@ async def _open_employee_id_report_modal(page: Page, portal_username: str):
         except Exception:
             pass
 
-    # Final fallback — grab all eye icons and pick by index
-    icons = page.locator(
-        "[id*='customReportWriter-action-cell-view'], fa-icon.view, svg.fa-eye, i.fa-eye"
-    )
+    # Try by exact id pattern (index-based)
+    try:
+        cell = page.locator(f"[id*='customReportWriter-actions-cell-{pick_index}']").first
+        if await cell.count() > 0:
+            eye = cell.locator("[id*='view-action'], fa-icon.view, svg.fa-eye").first
+            if await eye.count() > 0:
+                await eye.scroll_into_view_if_needed()
+                await eye.click(force=True)
+                return
+    except Exception:
+        pass
+
+    # Final fallback — pick by index from all eye icons
+    icons = page.locator(eye_selector)
     n = await icons.count()
-    if n == 0:
-        raise RuntimeError("No view (eye) icons found on Heartland Custom Reports page.")
     idx = min(max(pick_index, 0), n - 1)
     await icons.nth(idx).scroll_into_view_if_needed()
     await icons.nth(idx).click(force=True)
@@ -1205,7 +1207,8 @@ def refresh_employee_keys_from_heartland(username: str) -> dict:
 
         async def _inner():
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True, slow_mo=50)
+                _sys_chromium = __import__('shutil').which('chromium') or __import__('shutil').which('chromium-browser')
+                browser = await p.chromium.launch(headless=True, slow_mo=50, **({'executable_path': _sys_chromium} if _sys_chromium else {}))
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
                 excel_path = await _download_employee_excel_from_heartland(page, hl_user, hl_pass, username)
@@ -1828,7 +1831,8 @@ def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_en
 
         async def _inner_salondata():
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True, slow_mo=50)
+                _sys_chromium = __import__('shutil').which('chromium') or __import__('shutil').which('chromium-browser')
+                browser = await p.chromium.launch(headless=True, slow_mo=50, **({'executable_path': _sys_chromium} if _sys_chromium else {}))
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
                 csv_path, _ = await download_salondata_csv(page, sd_user, sd_pass, period_end_date)
@@ -1891,7 +1895,8 @@ def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_en
 # ---------- Orchestration for Streamlit ----------
 async def _full_agentic_flow_inner(sd_user, sd_pass, hl_user, hl_pass, username, period_end_date=None, csv_path_prefetched=None) -> dict:
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, slow_mo=50)
+        _sys_chromium = __import__('shutil').which('chromium') or __import__('shutil').which('chromium-browser')
+                browser = await p.chromium.launch(headless=True, slow_mo=50, **({'executable_path': _sys_chromium} if _sys_chromium else {}))
         context = await browser.new_context(accept_downloads=True)
         page = await context.new_page()
 
