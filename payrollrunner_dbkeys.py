@@ -1781,7 +1781,6 @@ async def upload_to_heartland(page: Page, file_path: str, hl_user: str, hl_pass:
     await _heartland_login(page, hl_user, hl_pass, username)
 
     await page.goto("https://www.heartlandpayroll.com/Payroll/PayrollTimeCardImport/NewTimeCardImport", wait_until="domcontentloaded")
-    await page.wait_for_load_state("networkidle")
     await page.wait_for_timeout(2000)
 
     try:
