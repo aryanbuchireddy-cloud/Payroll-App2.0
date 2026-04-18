@@ -27,7 +27,7 @@ import PIL.Image
 import google.generativeai as genai
 
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6LKEQX4PLJx_e6VuEiXpx2vgZ-Krt_nEaAw0brFahfskw").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip() or "gemini-2.0-flash"
 
 
