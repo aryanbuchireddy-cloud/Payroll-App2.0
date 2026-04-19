@@ -9,11 +9,6 @@ import pandas as pd
 from dotenv import load_dotenv
 from typing import Optional, Tuple, List, Dict, Any
 
-try:
-    import streamlit as st
-except Exception:
-    st = None
-
 from pymongo import MongoClient
 from bson import ObjectId
 import gridfs
@@ -24,30 +19,16 @@ from vision_handyman_agent import BrowserHandymanAgent
 PDF_OUTPUT_DIR = os.path.join(os.getcwd(), "payroll_pdfs")
 os.makedirs(PDF_OUTPUT_DIR, exist_ok=True)
 
-
-def _get_secret_or_env(name: str, default: str = "") -> str:
-    try:
-        if st is not None:
-            v = st.secrets.get(name, None)
-            if v not in (None, ""):
-                return str(v).strip()
-    except Exception:
-        pass
-    v = os.getenv(name, "").strip()
-    if v:
-        return v
-    return default
-
-MONGO_URI = _get_secret_or_env("MONGO_URI", "mongodb://localhost:27017")
-MONGO_DB = _get_secret_or_env("MONGO_DB", "payrollInfo")
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+MONGO_DB = os.getenv("MONGO_DB", "payrollInfo")
 MONGO_COLL = "userInfo"
 
 # ---------- GridFS bucket for PDFs ----------
-PDF_GRIDFS_BUCKET = _get_secret_or_env("MONGO_PDF_GRIDFS_BUCKET", "payroll_pdfs")
-KEEP_LOCAL_PDFS = str(_get_secret_or_env("KEEP_LOCAL_PDFS", "0")).strip().lower() in ("1","true","yes")
+PDF_GRIDFS_BUCKET = os.getenv("MONGO_PDF_GRIDFS_BUCKET", "payroll_pdfs")
+KEEP_LOCAL_PDFS = str(os.getenv("KEEP_LOCAL_PDFS", "0")).strip().lower() in ("1","true","yes")
 
 # ---------- Per-user employee keys (stored in Mongo) ----------
-KEYS_COLL = _get_secret_or_env("MONGO_KEYS_COLL", "employeeKeysByUser")
+KEYS_COLL = os.getenv("MONGO_KEYS_COLL", "employeeKeysByUser")
 
 # ---------- Client-specific behavior (username-driven) ----------
 CLIENT_PROFILE_BY_USER = {
@@ -1091,7 +1072,7 @@ async def _open_employee_id_report_modal(page: Page, portal_username: str):
     eye_selector = "fa-icon.view, [id*='customReportWriter-action-cell-view'], svg.fa-eye, i.fa-eye"
 
     found = False
-    for _ in range(30):   # ~60 seconds total, same spirit as main
+    for _ in range(30):   # ~60 seconds total
         await page.wait_for_timeout(2000)
         try:
             n = await page.locator(eye_selector).count()
@@ -1105,7 +1086,7 @@ async def _open_employee_id_report_modal(page: Page, portal_username: str):
     if found:
         await page.wait_for_timeout(500)
 
-        # 1) try row by report name
+        # 1) Try by matching report text in the row
         if match_text:
             try:
                 row_locator = page.locator("tr, [role='row']").filter(
@@ -1122,7 +1103,7 @@ async def _open_employee_id_report_modal(page: Page, portal_username: str):
             except Exception:
                 pass
 
-        # 2) try indexed cell id
+        # 2) Try by exact id pattern (index-based)
         try:
             cell = page.locator(f"[id*='customReportWriter-actions-cell-{pick_index}']").first
             if await cell.count() > 0:
@@ -1136,7 +1117,7 @@ async def _open_employee_id_report_modal(page: Page, portal_username: str):
         except Exception:
             pass
 
-        # 3) final old-school non-vision fallback: choose nth eye icon
+        # 3) Final non-vision fallback — pick by index from all eye icons
         try:
             icons = page.locator(eye_selector)
             n = await icons.count()
@@ -1197,15 +1178,13 @@ async def _download_employee_excel_from_heartland(page: Page, hl_user: str, hl_p
     await _heartland_login(page, hl_user, hl_pass, username)
     await _open_employee_id_report_modal(page, username)
 
-    # Wait for the report modal form to fully render before touching dropdowns.
-    # The modal can take anywhere from ~0.5s to 10s+ depending on Heartland load.
     print("⏳ Waiting for report modal to load…")
     try:
         await page.wait_for_selector("mat-form-field", state="visible", timeout=30000)
         await page.wait_for_load_state("networkidle", timeout=15000)
     except Exception:
         pass
-    await page.wait_for_timeout(800)   # small extra settle after networkidle
+    await page.wait_for_timeout(800)
 
     try:
         print("🔽 Output Type: Excel")
@@ -1215,49 +1194,42 @@ async def _download_employee_excel_from_heartland(page: Page, hl_user: str, hl_p
 
     print("▶️ Running Employee id report…")
     excel_path = "heartland_employee_ids.xlsx"
-    report_id_found: list[str] = []
+    excel_bytes_found: list[bytes] = []
 
     async def _intercept_checkstatus(response):
-        if "checkstatus" in response.url.lower() and not report_id_found:
-            try:
-                data = await response.json()
-                rid = str(data.get("reportId") or data.get("ReportId") or "").strip()
-                if rid:
-                    report_id_found.append(rid)
-                    print(f"📋 Got reportId from checkstatus: {rid}")
-            except Exception:
-                pass  # first poll may return non-JSON — ignore
+        if "checkstatus" not in response.url.lower():
+            return
+        if excel_bytes_found:
+            return
+        try:
+            data = await response.json()
+            status = str(data.get("Status") or "").strip()
+            report_data = str(data.get("ReportData") or "").strip()
+            print(f"📡 checkstatus status={status}, ReportData={'present' if report_data else 'empty'}")
+            if status == "Completed" and report_data:
+                import base64
+                raw = base64.b64decode(report_data)
+                excel_bytes_found.append(raw)
+                print(f"✅ Got Excel from ReportData ({len(raw)} bytes)")
+        except Exception as e:
+            print(f"⚠️ checkstatus parse skipped: {e}")
 
     async with page.context.expect_page() as popup_info:
         await page.get_by_role("button", name="Run Report").click()
     viewer = await popup_info.value
     viewer.on("response", _intercept_checkstatus)
 
-    print("⏳ Waiting for checkstatus to return reportId (may take several minutes)…")
-    for _ in range(150):   # up to 5 minutes
-        await viewer.wait_for_timeout(2000)
-        if report_id_found:
+    print("⏳ Waiting for checkstatus to return completed report (may take several minutes)…")
+    for _ in range(180):
+        await page.wait_for_timeout(2000)
+        if excel_bytes_found:
             break
     else:
-        raise RuntimeError("checkstatus never returned a reportId after 5 minutes.")
-
-    report_id = report_id_found[0]
-    download_url = f"https://www.heartlandpayroll.com/Reports/Viewer/viewpdf?reportId={report_id}&download=true"
-    print(f"⬇️ Fetching {download_url}")
-
-    cookies = await page.context.cookies()
-    cookie_jar = {c["name"]: c["value"] for c in cookies}
-
-    import httpx
-    async with httpx.AsyncClient(cookies=cookie_jar, timeout=120, follow_redirects=True) as client:
-        r = await client.get(download_url)
-
-    if r.status_code != 200 or len(r.content) < 512:
-        raise RuntimeError(f"viewpdf returned status {r.status_code}, size {len(r.content)} — not a valid Excel file.")
+        raise RuntimeError("checkstatus never returned a completed report after 6 minutes.")
 
     with open(excel_path, "wb") as f:
-        f.write(r.content)
-    print(f"✅ Downloaded Employee ID Excel → {excel_path} ({len(r.content)} bytes)")
+        f.write(excel_bytes_found[0])
+    print(f"✅ Saved Excel → {excel_path} ({len(excel_bytes_found[0])} bytes)")
     return excel_path
 
 
@@ -1364,7 +1336,8 @@ def refresh_employee_keys_from_heartland(username: str) -> dict:
 
         async def _inner():
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True, slow_mo=50)
+                _sys_chromium = __import__('shutil').which('chromium') or __import__('shutil').which('chromium-browser')
+                browser = await p.chromium.launch(headless=True, slow_mo=50, **({'executable_path': _sys_chromium} if _sys_chromium else {}))
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
                 excel_path = await _download_employee_excel_from_heartland(page, hl_user, hl_pass, username)
@@ -1427,6 +1400,7 @@ def refresh_employee_keys_from_heartland(username: str) -> dict:
         print("❌ Error refreshing employee keys from Heartland (Excel):", repr(e))
         traceback.print_exc()
         return {"ok": False, "error": _friendly_error_message(e), "count": 0}
+
 
 
 # ---------- PDF combined report ----------
