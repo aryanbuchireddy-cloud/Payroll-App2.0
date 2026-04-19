@@ -1079,7 +1079,6 @@ async def _open_employee_id_report_modal(page: Page, portal_username: str):
         "https://www.heartlandpayroll.com/Reports/CustomReports/CustomReportWriter",
         wait_until="domcontentloaded",
     )
-    await page.wait_for_timeout(1200)
 
     uname = (portal_username or "").strip().lower()
     cfg = HEARTLAND_EMPLOYEEID_REPORT_PICK.get(uname) or {}
@@ -1087,42 +1086,80 @@ async def _open_employee_id_report_modal(page: Page, portal_username: str):
     pick_index = int(cfg.get("index", 0) or 0)
     handyman = _get_handyman_agent()
 
-    try:
+    # --- MAIN BRANCH LOGIC FIRST ---
+    print("⏳ Waiting for Custom Reports table to load…")
+    eye_selector = "fa-icon.view, [id*='customReportWriter-action-cell-view'], svg.fa-eye, i.fa-eye"
+
+    found = False
+    for _ in range(30):   # ~60 seconds total, same spirit as main
+        await page.wait_for_timeout(2000)
+        try:
+            n = await page.locator(eye_selector).count()
+            if n > 0:
+                print(f"✅ Found {n} eye icon(s) on Custom Reports page")
+                found = True
+                break
+        except Exception:
+            pass
+
+    if found:
+        await page.wait_for_timeout(500)
+
+        # 1) try row by report name
         if match_text:
-            locator = page.locator(f"text={match_text}")
-            if await locator.count() > 0:
-                row = locator.first.locator("xpath=ancestor::tr[1]")
-                if await row.count() == 0:
-                    row = locator.first.locator("xpath=ancestor::div[1]")
+            try:
+                row_locator = page.locator("tr, [role='row']").filter(
+                    has=page.locator(f"text={match_text}")
+                ).first
+                if await row_locator.count() > 0:
+                    eye = row_locator.locator(
+                        "[id*='view-action'], fa-icon.view, svg.fa-eye, i.fa-eye"
+                    ).first
+                    if await eye.count() > 0:
+                        await eye.scroll_into_view_if_needed()
+                        await eye.click(force=True)
+                        return
+            except Exception:
+                pass
 
-                view_in_row = row.locator("fa-icon.view, i.fa-eye, i.fa.fa-eye, svg.fa-eye, [id*='view-action']")
-                if await view_in_row.count() > 0:
-                    await view_in_row.first.click()
+        # 2) try indexed cell id
+        try:
+            cell = page.locator(f"[id*='customReportWriter-actions-cell-{pick_index}']").first
+            if await cell.count() > 0:
+                eye = cell.locator(
+                    "[id*='view-action'], fa-icon.view, svg.fa-eye, i.fa-eye"
+                ).first
+                if await eye.count() > 0:
+                    await eye.scroll_into_view_if_needed()
+                    await eye.click(force=True)
                     return
-    except Exception:
-        pass
+        except Exception:
+            pass
 
-    icons = page.locator('fa-icon.view, i.fa-eye, i.fa.fa-eye, svg.fa-eye, [id*="view-action"]')
-    try:
-        n = await icons.count()
-    except Exception:
-        n = 0
+        # 3) final old-school non-vision fallback: choose nth eye icon
+        try:
+            icons = page.locator(eye_selector)
+            n = await icons.count()
+            if n > 0:
+                idx = min(max(pick_index, 0), n - 1)
+                await icons.nth(idx).scroll_into_view_if_needed()
+                await icons.nth(idx).click(force=True)
+                return
+        except Exception:
+            pass
 
-    if n > 0:
-        pick_index = min(max(pick_index, 0), n - 1)
-        await icons.nth(pick_index).click()
-        return
-
+    # --- GEMINI ONLY IF MAIN LOGIC FAILED ---
     if handyman:
+        print("🛠️ Main branch logic failed; trying Gemini fallback…")
         ok = await handyman.smart_click(
             page,
             task=f"On Heartland Custom Reports, click the view or eye icon for the report named {match_text}.",
-            max_steps=12,
+            max_steps=4,
         )
         if ok:
             return
 
-    raise RuntimeError('No view (eye) icons found for Heartland reports list.')
+    raise RuntimeError("No view (eye) icons found for Heartland reports list.")
 
 
 async def _download_employee_excel_from_heartland(page: Page, hl_user: str, hl_pass: str, username: str) -> str:
