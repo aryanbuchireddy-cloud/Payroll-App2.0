@@ -1369,16 +1369,15 @@ with st.expander("🔑 Update passwords", expanded=False):
 #  Only active while a background thread is alive.
 # ═════════════════════════════════════════════════════════════════════════════
 _rt = ss.get("readiness_thread", None)
-_pt = ss.get("payroll_thread",   None)
+_pt = ss.get("payroll_thread", None)
 _bg_running = (
     (_rt is not None and _rt.is_alive())
     or (_pt is not None and _pt.is_alive())
 )
 
-if _bg_running:
-    if st_autorefresh is not None:
-        st_autorefresh(interval=2500, limit=None, key="bg_autorefresh")
-    else:
-        # Fallback if streamlit-autorefresh is not installed
-        time.sleep(2)
-        st.rerun()
+_thread_just_died = ss.get("_last_bg_running", False) and not _bg_running
+ss["_last_bg_running"] = _bg_running
+
+if _thread_just_died or _bg_running:
+    time.sleep(2.5)
+    st.rerun()
