@@ -13,6 +13,14 @@ from pymongo import MongoClient
 from bson import ObjectId
 import gridfs
 from playwright.async_api import async_playwright, Page
+from payroll_backend_bridge import (
+    get_runner_parser_profile,
+    handle_heartland_selection_for_user,
+    make_user_run_context,
+    save_salondata_download_for_user,
+)
+
+from gridfs_pdf_storage import store_and_log_pdf
 
 from crypto_utils import decrypt_str
 from vision_handyman_agent import BrowserHandymanAgent
@@ -23,13 +31,19 @@ MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB = os.getenv("MONGO_DB", "payrollInfo")
 MONGO_COLL = "userInfo"
 
-# ---------- GridFS bucket for PDFs ----------
-PDF_GRIDFS_BUCKET = os.getenv("MONGO_PDF_GRIDFS_BUCKET", "payroll_pdfs")
-KEEP_LOCAL_PDFS = str(os.getenv("KEEP_LOCAL_PDFS", "0")).strip().lower() in ("1","true","yes")
+from app_config import (
+    MONGO_URI,
+    MONGO_DB,
+    MONGO_USERS_COLL,
+    MONGO_KEYS_COLL,
+    MONGO_PDF_GRIDFS_BUCKET,
+    KEEP_LOCAL_PDFS,
+    PDF_OUTPUT_DIR,
+)
 
-# ---------- Per-user employee keys (stored in Mongo) ----------
-KEYS_COLL = os.getenv("MONGO_KEYS_COLL", "employeeKeysByUser")
-
+MONGO_COLL = MONGO_USERS_COLL
+KEYS_COLL = MONGO_KEYS_COLL
+PDF_GRIDFS_BUCKET = MONGO_PDF_GRIDFS_BUCKET
 # ---------- Client-specific behavior (username-driven) ----------
 CLIENT_PROFILE_BY_USER = {
     "quopayroll@gmail.com": "geoff",
@@ -374,6 +388,7 @@ async def download_salondata_csv(
     sd_user: str,
     sd_pass: str,
     period_end_date=None,
+    run_ctx=None,
 ) -> Tuple[str, str]:
     d = _coerce_date(period_end_date) if period_end_date is not None else _default_payroll_friday()
     if not _is_friday(d):
@@ -521,8 +536,11 @@ async def download_salondata_csv(
             raise RuntimeError("Could not click Download CSV in SalonData.")
     download = await download_info.value
 
-    csv_path = "salondata_payroll.csv"
-    await download.save_as(csv_path)
+    if run_ctx is not None:
+        csv_path = await save_salondata_download_for_user(download, run_ctx)
+    else:
+        csv_path = f"salondata_payroll_{int(time.time())}.csv"
+        await download.save_as(csv_path)
     print(f"✅ Downloaded SalonData payroll CSV → {csv_path}")
     return csv_path, friday_str
 
@@ -2073,7 +2091,7 @@ async def _full_agentic_flow_inner(sd_user, sd_pass, hl_user, hl_pass, username,
         browser = await p.chromium.launch(headless=True, slow_mo=50)
         context = await browser.new_context(accept_downloads=True)
         page = await context.new_page()
-
+        run_ctx = make_user_run_context(username)
         if csv_path_prefetched and os.path.exists(csv_path_prefetched):
             print(f"♻️ Reusing prefetched SalonData CSV → {csv_path_prefetched}")
             csv_path = csv_path_prefetched
@@ -2081,7 +2099,7 @@ async def _full_agentic_flow_inner(sd_user, sd_pass, hl_user, hl_pass, username,
             d = _coerce_date(period_end_date) if period_end_date else _default_payroll_friday()
             period_end = d.strftime("%m/%d/%Y")
         else:
-            csv_path, period_end = await download_salondata_csv(page, sd_user, sd_pass, period_end_date)
+            csv_path, period_end = await download_salondata_csv(page, sd_user, sd_pass, period_end_date, run_ctx=run_ctx)
 
         safe_period = re.sub(r"[^0-9A-Za-z]+", "-", (period_end or "").strip()).strip("-")
         if not safe_period:
