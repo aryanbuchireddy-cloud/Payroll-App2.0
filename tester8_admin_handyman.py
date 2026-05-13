@@ -14,7 +14,7 @@ from pymongo import MongoClient, ReturnDocument
 import gridfs
 from bson import ObjectId
 from pymongo.errors import DuplicateKeyError, ConnectionFailure
-
+from tenant_admin_ui import render_tenant_profile_admin
 from crypto_utils import encrypt_str
 from payrollrunner_dbkeys_handyman import run_payroll_for_user, check_payroll_ready_for_user
 import subprocess, sys
@@ -734,6 +734,7 @@ with st.sidebar:
 # ═════════════════════════════════════════════════════════════════════════════
 if menu == "Admin":
     st.subheader("🔐 Admin")
+    render_tenant_profile_admin(users)
 
     # ── Account list ──────────────────────────────────────────────────────────
     st.markdown("### Accounts")
