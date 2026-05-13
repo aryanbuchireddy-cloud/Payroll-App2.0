@@ -2028,7 +2028,8 @@ def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_en
                 browser = await p.chromium.launch(headless=True, slow_mo=50)
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
-                csv_path, _ = await download_salondata_csv(page, sd_user, sd_pass, period_end_date)
+                run_ctx = make_user_run_context(username)
+                csv_path, _ = await download_salondata_csv(page, sd_user, sd_pass, period_end_date, run_ctx=run_ctx)
                 await browser.close()
                 return csv_path
 
