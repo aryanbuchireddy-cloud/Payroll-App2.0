@@ -1,16 +1,49 @@
-# crypto_utils.py
-import os
+"""
+crypto_utils.py
+---------------
+
+Shared encryption for the Streamlit UI and backend runner.
+
+Important:
+    Do NOT hardcode Fernet keys in this file.
+    The key must come from PAYROLL_ENC_KEY in Streamlit secrets/env.
+
+Put this file in the repo root and replace the old crypto_utils.py.
+"""
+
+from __future__ import annotations
+
 from cryptography.fernet import Fernet
+from app_config import PAYROLL_ENC_KEY
 
-_KEY ='Y7-Dsht3fzSZ3b9RiuxpYgIqnPefA30nNB6s84iQCoA='
 
-# _KEY will be set from app.py via os.environ.setdefault(...)
-fernet = Fernet(_KEY.encode() if isinstance(_KEY, str) else _KEY)
+def _get_fernet() -> Fernet:
+    if not PAYROLL_ENC_KEY:
+        raise RuntimeError(
+            "PAYROLL_ENC_KEY is missing. Add it to Streamlit secrets or environment variables."
+        )
 
-def encrypt_str(s: str) -> str:
-    """Encrypt a string and return a base64 token."""
-    return fernet.encrypt(s.encode("utf-8")).decode("utf-8")
+    try:
+        return Fernet(PAYROLL_ENC_KEY.encode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError(
+            "PAYROLL_ENC_KEY is invalid. It must be a valid Fernet base64 key. "
+            "Generate one with: from cryptography.fernet import Fernet; Fernet.generate_key()"
+        ) from exc
+
+
+_FERNET = _get_fernet()
+
+
+def encrypt_str(value: str) -> str:
+    """
+    Encrypt a string to a Fernet token.
+    """
+    return _FERNET.encrypt((value or "").encode("utf-8")).decode("utf-8")
+
 
 def decrypt_str(token: str) -> str:
-    """Decrypt a base64 token back to original string."""
-    return fernet.decrypt(token.encode("utf-8")).decode("utf-8")
+    """
+    Decrypt a Fernet token to a string.
+    """
+    return _FERNET.decrypt((token or "").encode("utf-8")).decode("utf-8")
