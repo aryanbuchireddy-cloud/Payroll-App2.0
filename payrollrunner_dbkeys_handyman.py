@@ -24,12 +24,7 @@ from gridfs_pdf_storage import store_and_log_pdf
 
 from crypto_utils import decrypt_str
 from vision_handyman_agent import BrowserHandymanAgent
-PDF_OUTPUT_DIR = os.path.join(os.getcwd(), "payroll_pdfs")
-os.makedirs(PDF_OUTPUT_DIR, exist_ok=True)
 
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-MONGO_DB = os.getenv("MONGO_DB", "payrollInfo")
-MONGO_COLL = "userInfo"
 
 from app_config import (
     MONGO_URI,
