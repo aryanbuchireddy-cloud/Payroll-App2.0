@@ -965,8 +965,8 @@ async def _heartland_login(page: Page, hl_user: str, hl_pass: str, username: str
             + str(tenant_result.get("reason"))
         )
 
-    await _maybe_select_multi_account(page, username)
-    await _maybe_select_multi_client(page, username)
+    #await _maybe_select_multi_account(page, username)
+    #await _maybe_select_multi_client(page, username)
 
     await page.wait_for_selector(r"text=/\b(?:Welcome|General)\b/i", timeout=300000)
     print("✅ Welcome page loaded.")
