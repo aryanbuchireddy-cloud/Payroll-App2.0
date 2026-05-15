@@ -1720,12 +1720,21 @@ def build_combined_pdf_geoff(input_csv_path: str, keys_csv_path: str, output_pdf
 
 
 def build_combined_pdf_for_user(input_csv_path: str, keys_csv_path: str, output_pdf_path: str) -> str:
-    uname = (keys_csv_path or "").lower().strip()
-    profile = (CLIENT_PROFILE_BY_USER.get(uname) or "default").lower().strip()
-    if profile == "geoff":
-        return build_combined_pdf_geoff(input_csv_path, keys_csv_path, output_pdf_path)
-    return build_combined_pdf(input_csv_path, keys_csv_path, output_pdf_path)
+    """
+    Build the combined payroll PDF using the parser profile saved in Mongo tenant_profile.
 
+    NOTE:
+    In this app, keys_csv_path is actually being used as the portal username.
+    Example call:
+        build_combined_pdf_for_user(csv_path, username, pdf_path)
+    """
+    username = (keys_csv_path or "").lower().strip()
+    profile = (get_runner_parser_profile(username) or "standard").lower().strip()
+
+    if profile == "geoff":
+        return build_combined_pdf_geoff(input_csv_path, username, output_pdf_path)
+
+    return build_combined_pdf(input_csv_path, username, output_pdf_path)
 
 # ---------- Formatting CSV for Heartland ----------
 from typing import Optional
@@ -1891,13 +1900,25 @@ def format_csv_for_heartland_geoff(input_csv_path: str, username: str, output_pa
     return output_path
 
 
-def format_csv_for_heartland_for_user(csv_path: str, username: str) -> pd.DataFrame:
+def format_csv_for_heartland_for_user(csv_path: str, username: str) -> Optional[str]:
+    """
+    Format Heartland upload CSV using the parser/format profile saved in Mongo tenant_profile.
+    """
     uname = (username or "").lower().strip()
-    profile = (CLIENT_PROFILE_BY_USER.get(uname) or "default").lower().strip()
-    if profile == "geoff":
-        return format_csv_for_heartland_geoff(csv_path, username, "Cleaned_Heartland_Ready_Payroll.csv")
-    return format_csv_for_heartland(csv_path, username, "Cleaned_Heartland_Ready_Payroll.csv")
+    profile = (get_runner_parser_profile(uname) or "standard").lower().strip()
 
+    if profile == "geoff":
+        return format_csv_for_heartland_geoff(
+            csv_path,
+            uname,
+            "Cleaned_Heartland_Ready_Payroll.csv",
+        )
+
+    return format_csv_for_heartland(
+        csv_path,
+        uname,
+        "Cleaned_Heartland_Ready_Payroll.csv",
+    )
 
 # ---------- Heartland upload ----------
 async def upload_to_heartland(page: Page, file_path: str, hl_user: str, hl_pass: str, username: str) -> None:
