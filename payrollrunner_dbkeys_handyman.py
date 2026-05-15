@@ -958,6 +958,17 @@ async def _heartland_login(page: Page, hl_user: str, hl_pass: str, username: str
 
     await page.wait_for_selector(r"text=/\b(?:Welcome|General)\b/i", timeout=300000)
     print("✅ Welcome page loaded.")
+    tenant_result = await handle_heartland_selection_for_user(
+        page,
+        username,
+        handyman=_get_handyman_agent(),
+    )
+    
+    if not tenant_result.get("ok"):
+        raise RuntimeError(
+            "Heartland profile/client selection failed: "
+            + str(tenant_result.get("reason"))
+        )
 
 
 async def _maybe_select_multi_account(page: Page, username: str) -> None:
