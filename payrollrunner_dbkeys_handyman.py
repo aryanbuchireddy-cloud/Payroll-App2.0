@@ -887,11 +887,10 @@ def load_clean_biweekly_table_geoff(csv_path: str) -> pd.DataFrame:
 
 def load_clean_biweekly_table_for_user(csv_path: str, username: str) -> pd.DataFrame:
     uname = (username or "").lower().strip()
-    profile = (CLIENT_PROFILE_BY_USER.get(uname) or "default").lower().strip()
+    profile = (get_runner_parser_profile(uname) or "standard").lower().strip()
     if profile == "geoff":
         return load_clean_biweekly_table_geoff(csv_path)
     return load_clean_biweekly_table(csv_path)
-
 
 # ---------- Heartland login + MFA ----------
 async def _heartland_login(page: Page, hl_user: str, hl_pass: str, username: str) -> None:
