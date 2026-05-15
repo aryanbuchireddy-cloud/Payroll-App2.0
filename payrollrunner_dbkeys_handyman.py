@@ -8,7 +8,7 @@ import pandas as pd
 
 from dotenv import load_dotenv
 from typing import Optional, Tuple, List, Dict, Any
-
+from multi_tenant_profiles import get_heartland_pick
 from pymongo import MongoClient
 from bson import ObjectId
 import gridfs
@@ -1086,7 +1086,7 @@ async def _open_employee_id_report_modal(page: Page, portal_username: str):
     )
 
     uname = (portal_username or "").strip().lower()
-    cfg = HEARTLAND_EMPLOYEEID_REPORT_PICK.get(uname) or {}
+    cfg = get_heartland_pick(uname, "employeeid")
     match_text = (cfg.get("match") or "").strip() or "Employee id"
     pick_index = int(cfg.get("index", 0) or 0)
     handyman = _get_handyman_agent()
