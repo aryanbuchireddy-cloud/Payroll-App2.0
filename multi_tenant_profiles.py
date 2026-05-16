@@ -363,8 +363,21 @@ async def _smart_pick_with_optional_handyman(
 
 async def _screen_seems_like_selection(page: Page) -> bool:
     txt = (await _visible_text(page)).lower()
+    if _screen_seems_like_mfa(txt):
+        return False
     clues = ["continue", "select", "profile", "client", "company", "partner user", "great clips"]
     return any(c in txt for c in clues)
+
+
+def _screen_seems_like_mfa(body_text: str) -> bool:
+    low = (body_text or "").lower()
+    return (
+        "verify mfa" in low
+        or "verification code" in low
+        or "secondary factor" in low
+        or "authenticator app" in low
+        or "verifying" in low
+    )
 
 
 async def handle_heartland_post_login_selection_flow(
@@ -409,6 +422,17 @@ async def handle_heartland_post_login_selection_flow(
         await log_event("round", f"{round_num}/{tenant.max_selection_rounds}")
         print(f"🧪 round={round_num}, url={page.url}")
         print(f"🧪 body_preview={_short_text(body_text, 600)}")
+
+        if _screen_seems_like_mfa(body_text):
+            await _debug_heartland_page(page, "Heartland MFA unresolved before tenant selection")
+            await log_event("failed", "Heartland MFA screen is still visible after code submission.")
+            return {
+                "ok": False,
+                "reason": "heartland_mfa_unresolved",
+                "events": events,
+                "last_screen_text": body_text[:1000],
+                "profile": tenant.raw,
+            }
 
         did_something = False
 
