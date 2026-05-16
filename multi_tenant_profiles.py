@@ -325,6 +325,76 @@ async def _click_nth_text_match(page: Page, match: str, index: int = 0) -> bool:
     return False
 
 
+async def _click_multiclient_change_button(page: Page, pick: Dict[str, Any]) -> bool:
+    """
+    Heartland MultiClient rows expose a dedicated "Go To Client" button id.
+    Text clicks on the client row can report success without navigating.
+    """
+    try:
+        body_text = await _visible_text(page)
+        body_low = body_text.lower()
+        url_before = page.url or ""
+    except Exception:
+        body_text = ""
+        body_low = ""
+        url_before = ""
+
+    is_multiclient = (
+        "dashboardpartial/multiclient" in url_before.lower()
+        or ("multi - client" in body_low and "go to client" in body_low)
+    )
+    if not is_multiclient:
+        return False
+
+    index = max(0, int((pick or {}).get("index") or 0))
+    match = str((pick or {}).get("match") or "").strip()
+    selector = f"#payroll-dashboard-multiClient-client-change-{index}"
+
+    print(
+        "Heartland MultiClient button attempt "
+        f"selector={selector} match={match!r} url_before={url_before}"
+    )
+    print(f"Heartland MultiClient body before={_short_text(body_text, 900)}")
+
+    try:
+        button = page.locator(selector).first
+        if await button.count() <= 0:
+            print(f"Heartland MultiClient button not found: {selector}")
+            return False
+        await button.wait_for(state="visible", timeout=5000)
+        await button.scroll_into_view_if_needed()
+        await button.click()
+    except Exception as exc:
+        print(f"Heartland MultiClient button click failed selector={selector}: {exc}")
+        return False
+
+    try:
+        await page.wait_for_load_state("networkidle", timeout=10000)
+    except Exception:
+        pass
+
+    for _ in range(5):
+        await page.wait_for_timeout(1000)
+        try:
+            url_after = page.url or ""
+        except Exception:
+            url_after = ""
+        body_after = await _visible_text(page)
+        still_multiclient = (
+            "dashboardpartial/multiclient" in url_after.lower()
+            or ("multi - client" in body_after.lower() and "go to client" in body_after.lower())
+        )
+        print(
+            "Heartland MultiClient button result "
+            f"url_after={url_after} still_multiclient={still_multiclient} "
+            f"body_after={_short_text(body_after, 900)}"
+        )
+        if not still_multiclient:
+            return True
+
+    return True
+
+
 async def _smart_pick_with_optional_handyman(
     page: Page,
     *,
@@ -455,12 +525,14 @@ async def handle_heartland_post_login_selection_flow(
         body_low = body_text.lower()
         if client_pick.get("match"):
             if client_pick["match"].lower() in body_low or "client" in body_low or "company" in body_low:
-                ok = await _smart_pick_with_optional_handyman(
-                    page,
-                    pick=client_pick,
-                    task_name="client / company",
-                    handyman=handyman,
-                )
+                ok = await _click_multiclient_change_button(page, client_pick)
+                if not ok:
+                    ok = await _smart_pick_with_optional_handyman(
+                        page,
+                        pick=client_pick,
+                        task_name="client / company",
+                        handyman=handyman,
+                    )
                 if ok:
                     did_something = True
                     await log_event("selected_client", str(client_pick))
