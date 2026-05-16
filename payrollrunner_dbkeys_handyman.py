@@ -942,6 +942,29 @@ async def _heartland_login(page: Page, hl_user: str, hl_pass: str, username: str
     except Exception:
         pass
 
+    post_mfa_responses = []
+
+    def _remember_post_mfa_response(response) -> None:
+        try:
+            url = response.url
+            low_url = (url or "").lower()
+            if not any(token in low_url for token in ("heartland", "auth", "identity", "mfa", "verify")):
+                return
+            post_mfa_responses.append(
+                {
+                    "status": response.status,
+                    "url": url[:260],
+                }
+            )
+            del post_mfa_responses[:-12]
+        except Exception:
+            pass
+
+    try:
+        page.on("response", _remember_post_mfa_response)
+    except Exception:
+        pass
+
     await page.keyboard.press("Enter")
     print("✅ Submitted Heartland MFA code; waiting for post-MFA redirect...")
 
@@ -961,23 +984,84 @@ async def _heartland_login(page: Page, hl_user: str, hl_pass: str, username: str
             or "authenticator app" in low
         )
 
+    def _mfa_rejection_phrase(body_text: str) -> str:
+        low = (body_text or "").lower()
+        rejection_phrases = [
+            "invalid verification code",
+            "incorrect verification code",
+            "verification code expired",
+            "verification code has expired",
+            "invalid code",
+            "incorrect code",
+            "code expired",
+            "code has expired",
+            "invalid passcode",
+            "incorrect passcode",
+            "passcode expired",
+            "passcode has expired",
+            "invalid otp",
+            "incorrect otp",
+            "otp expired",
+            "otp has expired",
+            "one-time passcode is invalid",
+            "one-time password is invalid",
+            "code you entered is invalid",
+            "code you entered is incorrect",
+            "verification failed",
+            "authentication failed",
+        ]
+        for phrase in rejection_phrases:
+            if phrase in low:
+                return phrase
+        return ""
+
+    def _log_post_mfa_probe(elapsed_sec: int, body_text: str) -> None:
+        print(
+            "Heartland MFA probe "
+            f"elapsed={elapsed_sec}s "
+            f"url={page.url} "
+            f"looks_like_mfa={_looks_like_mfa_screen(body_text)} "
+            f"body_len={len(body_text or '')}"
+        )
+        if post_mfa_responses:
+            print(f"Heartland MFA recent responses={post_mfa_responses[-5:]}")
+        if body_text:
+            print(f"Heartland MFA body snapshot={body_text[:1200]}")
+
     mfa_deadline = time.time() + 120
+    mfa_started_at = time.time()
     last_mfa_body = ""
+    probe_count = 0
     while time.time() < mfa_deadline:
         await page.wait_for_timeout(1000)
+        probe_count += 1
         last_mfa_body = await _current_body_text()
-        body_low = last_mfa_body.lower()
+        elapsed_sec = int(time.time() - mfa_started_at)
+        rejection_phrase = _mfa_rejection_phrase(last_mfa_body)
+
+        if probe_count <= 5 or probe_count % 5 == 0:
+            _log_post_mfa_probe(elapsed_sec, last_mfa_body)
 
         if not _looks_like_mfa_screen(last_mfa_body):
+            print(f"Heartland MFA screen cleared after {elapsed_sec}s. URL={page.url}")
+            if post_mfa_responses:
+                print(f"Heartland MFA final recent responses={post_mfa_responses[-8:]}")
             break
 
-        if any(word in body_low for word in ["invalid", "incorrect", "expired", "try again"]):
+        if rejection_phrase:
+            print(f"Heartland MFA rejection phrase matched: {rejection_phrase}")
+            print(f"Heartland MFA rejected URL={page.url}")
+            print(f"Heartland MFA rejected page body={last_mfa_body[:1200]}")
+            if post_mfa_responses:
+                print(f"Heartland MFA rejection recent responses={post_mfa_responses[-8:]}")
             raise RuntimeError(
                 "Heartland MFA was rejected. Please request a fresh 6-digit code and submit it again."
             )
     else:
         print(f"⚠️ Heartland MFA still unresolved. URL={page.url}")
         print(f"⚠️ Heartland MFA page body={last_mfa_body[:800]}")
+        if post_mfa_responses:
+            print(f"Heartland MFA unresolved recent responses={post_mfa_responses[-8:]}")
         raise RuntimeError(
             "Heartland MFA did not finish after the code was submitted. "
             "Heartland is still showing the MFA verification screen, so the app stopped before tenant selection."
