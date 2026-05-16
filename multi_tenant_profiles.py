@@ -395,6 +395,123 @@ async def _click_multiclient_change_button(page: Page, pick: Dict[str, Any]) -> 
     return True
 
 
+async def _click_multiaccount_select_button(page: Page, pick: Dict[str, Any]) -> bool:
+    """
+    Heartland MultiAccount/Profile rows expose dedicated Select button ids.
+    Prefer those controls before text clicks, because text clicks can hit inert row text.
+    """
+    try:
+        body_text = await _visible_text(page)
+        body_low = body_text.lower()
+        url_before = page.url or ""
+    except Exception:
+        body_text = ""
+        body_low = ""
+        url_before = ""
+
+    try:
+        has_multiaccount_id = await page.locator("[id*='payroll-multiAccountSelection']").count() > 0
+    except Exception:
+        has_multiaccount_id = False
+
+    is_multiaccount = (
+        "multiaccountselection" in url_before.lower()
+        or "select a profile to log into" in body_low
+        or bool(has_multiaccount_id)
+    )
+    if not is_multiaccount:
+        return False
+
+    index = max(0, int((pick or {}).get("index") or 0))
+    match = str((pick or {}).get("match") or "").strip()
+    id_selector = f"#payroll-multiAccountSelection-payGroup-grid-select-btn-{index}-innerButton"
+    attempted = []
+
+    async def _click_and_verify(label: str, locator) -> bool:
+        print(
+            "Heartland MultiAccount button attempt "
+            f"label={label} match={match!r} index={index} "
+            f"url_before={url_before}"
+        )
+        print(f"Heartland MultiAccount body before={_short_text(body_text, 900)}")
+        try:
+            if await locator.count() <= 0:
+                print(f"Heartland MultiAccount button not found label={label}")
+                return False
+            target = locator.first
+            await target.wait_for(state="visible", timeout=5000)
+            await target.scroll_into_view_if_needed()
+            await target.click()
+        except Exception as exc:
+            print(f"Heartland MultiAccount button click failed label={label}: {exc}")
+            return False
+
+        try:
+            await page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass
+
+        for _ in range(5):
+            await page.wait_for_timeout(1000)
+            try:
+                url_after = page.url or ""
+            except Exception:
+                url_after = ""
+            body_after = await _visible_text(page)
+            try:
+                still_has_multiaccount_id = await page.locator("[id*='payroll-multiAccountSelection']").count() > 0
+            except Exception:
+                still_has_multiaccount_id = False
+            still_multiaccount = (
+                "multiaccountselection" in url_after.lower()
+                or "select a profile to log into" in body_after.lower()
+                or bool(still_has_multiaccount_id)
+            )
+            print(
+                "Heartland MultiAccount button result "
+                f"label={label} url_after={url_after} "
+                f"still_multiaccount={still_multiaccount} "
+                f"body_after={_short_text(body_after, 900)}"
+            )
+            if not still_multiaccount:
+                return True
+
+        return False
+
+    attempted.append(id_selector)
+    if await _click_and_verify(id_selector, page.locator(id_selector)):
+        return True
+
+    if match:
+        try:
+            row = page.locator("tr").filter(has_text=re.compile(re.escape(match), re.I)).first
+            row_button = row.locator(
+                "button:has-text('Select'), "
+                "[id*='multiAccountSelection'][id*='select-btn'][id$='innerButton']"
+            )
+            label = f"row Select button for {match!r}"
+            attempted.append(label)
+            if await _click_and_verify(label, row_button):
+                return True
+        except Exception as exc:
+            print(f"Heartland MultiAccount row-scoped Select failed match={match!r}: {exc}")
+
+    try:
+        buttons = page.locator("button:has-text('Select')")
+        count = await buttons.count()
+        if count > 0:
+            safe_index = min(index, count - 1)
+            label = f"generic Select button index={safe_index}"
+            attempted.append(label)
+            if await _click_and_verify(label, buttons.nth(safe_index)):
+                return True
+    except Exception as exc:
+        print(f"Heartland MultiAccount generic Select failed: {exc}")
+
+    print(f"Heartland MultiAccount button attempts exhausted: {attempted}")
+    return False
+
+
 async def _smart_pick_with_optional_handyman(
     page: Page,
     *,
@@ -509,12 +626,14 @@ async def handle_heartland_post_login_selection_flow(
         profile_pick = tenant.profile_pick
         if profile_pick.get("match"):
             if profile_pick["match"].lower() in body_low or "profile" in body_low or "partner" in body_low:
-                ok = await _smart_pick_with_optional_handyman(
-                    page,
-                    pick=profile_pick,
-                    task_name="profile / account type",
-                    handyman=handyman,
-                )
+                ok = await _click_multiaccount_select_button(page, profile_pick)
+                if not ok:
+                    ok = await _smart_pick_with_optional_handyman(
+                        page,
+                        pick=profile_pick,
+                        task_name="profile / account type",
+                        handyman=handyman,
+                    )
                 if ok:
                     did_something = True
                     await log_event("selected_profile", str(profile_pick))
