@@ -359,6 +359,8 @@ def _friendly_error_message(err) -> str:
     s = str(err or "").strip()
     s_low = s.lower()
 
+    if "heartland mfa" in s_low:
+        return s
     if "missing salondata credentials" in s_low or "missing salondata" in s_low:
         return "SalonData is not connected for this portal account. Please go to Setup and save your SalonData username/password."
     if "missing heartland credentials" in s_low or "missing heartland" in s_low:
@@ -941,6 +943,45 @@ async def _heartland_login(page: Page, hl_user: str, hl_pass: str, username: str
         pass
 
     await page.keyboard.press("Enter")
+    print("✅ Submitted Heartland MFA code; waiting for post-MFA redirect...")
+
+    async def _current_body_text() -> str:
+        try:
+            text = await page.locator("body").inner_text(timeout=3000)
+            return re.sub(r"\s+", " ", text or "").strip()
+        except Exception:
+            return ""
+
+    def _looks_like_mfa_screen(body_text: str) -> bool:
+        low = (body_text or "").lower()
+        return (
+            "verify mfa" in low
+            or "verification code" in low
+            or "secondary factor" in low
+            or "authenticator app" in low
+        )
+
+    mfa_deadline = time.time() + 120
+    last_mfa_body = ""
+    while time.time() < mfa_deadline:
+        await page.wait_for_timeout(1000)
+        last_mfa_body = await _current_body_text()
+        body_low = last_mfa_body.lower()
+
+        if not _looks_like_mfa_screen(last_mfa_body):
+            break
+
+        if any(word in body_low for word in ["invalid", "incorrect", "expired", "try again"]):
+            raise RuntimeError(
+                "Heartland MFA was rejected. Please request a fresh 6-digit code and submit it again."
+            )
+    else:
+        print(f"⚠️ Heartland MFA still unresolved. URL={page.url}")
+        print(f"⚠️ Heartland MFA page body={last_mfa_body[:800]}")
+        raise RuntimeError(
+            "Heartland MFA did not finish after the code was submitted. "
+            "Heartland is still showing the MFA verification screen, so the app stopped before tenant selection."
+        )
 
     try:
         await page.wait_for_load_state("networkidle", timeout=20000)
