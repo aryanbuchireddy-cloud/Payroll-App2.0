@@ -231,6 +231,35 @@ async def _visible_text(page: Page) -> str:
         return ""
 
 
+def _short_text(s: str, limit: int = 900) -> str:
+    s = re.sub(r"\s+", " ", str(s or "")).strip()
+    return s[:limit] + ("..." if len(s) > limit else "")
+
+
+async def _debug_heartland_page(page: Page, label: str) -> None:
+    try:
+        url = page.url or ""
+    except Exception:
+        url = "[url unavailable]"
+    try:
+        title = await page.title()
+    except Exception:
+        title = "[title unavailable]"
+    try:
+        body = await _visible_text(page)
+    except Exception:
+        body = "[body unavailable]"
+
+    print("")
+    print("=" * 80)
+    print(f"🧪 HEARTLAND DEBUG: {label}")
+    print(f"URL: {url}")
+    print(f"TITLE: {title}")
+    print(f"BODY: {_short_text(body)}")
+    print("=" * 80)
+    print("")
+
+
 async def _click_continue(page: Page, text: str = "Continue") -> bool:
     candidates = [
         f'button:has-text("{text}")',
@@ -362,6 +391,12 @@ async def handle_heartland_post_login_selection_flow(
         print(f"🏢 Heartland tenant flow | {action}: {detail}")
 
     await log_event("start", f"user={tenant.username}, parser_profile={tenant.parser_profile}")
+    print(f"🧪 tenant.username={tenant.username}")
+    print(f"🧪 tenant.parser_profile={tenant.parser_profile}")
+    print(f"🧪 tenant.profile_pick={tenant.profile_pick}")
+    print(f"🧪 tenant.client_pick={tenant.client_pick}")
+    print(f"🧪 tenant.employeeid_report_pick={tenant.employeeid_report_pick}")
+    await _debug_heartland_page(page, "after login before tenant selection")
 
     try:
         await page.wait_for_load_state("domcontentloaded", timeout=8000)
@@ -372,6 +407,8 @@ async def handle_heartland_post_login_selection_flow(
         body_text = await _visible_text(page)
         body_low = body_text.lower()
         await log_event("round", f"{round_num}/{tenant.max_selection_rounds}")
+        print(f"🧪 round={round_num}, url={page.url}")
+        print(f"🧪 body_preview={_short_text(body_text, 600)}")
 
         did_something = False
 
@@ -412,6 +449,7 @@ async def handle_heartland_post_login_selection_flow(
             await page.wait_for_timeout(tenant.wait_after_click_ms)
 
         still_selection = await _screen_seems_like_selection(page)
+        print(f"🧪 round={round_num}, did_something={did_something}, still_selection={still_selection}, url={page.url}")
 
         if not did_something and not still_selection:
             await log_event("done", "No more Heartland selection screens detected.")
@@ -440,6 +478,7 @@ async def handle_heartland_post_login_selection_flow(
         break
 
     body_final = await _visible_text(page)
+    await _debug_heartland_page(page, "FAILED tenant selection final state")
     await log_event("failed", "Heartland selection did not complete cleanly.")
     return {
         "ok": False,
