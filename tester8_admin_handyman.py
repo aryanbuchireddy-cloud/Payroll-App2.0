@@ -124,9 +124,53 @@ ss.setdefault("auth_user",               None)
 ss.setdefault("onboarding_mode",         False)
 ss.setdefault("payroll_thread_started",  False)
 ss.setdefault("payroll_thread",          None)
+ss.setdefault("payroll_thread_user",     None)
 ss.setdefault("readiness_thread_started", False)
 ss.setdefault("readiness_thread",        None)
+ss.setdefault("readiness_thread_user",   None)
 ss.setdefault("last_login_ts",           0)     # guards against component replaying last value
+
+DEFAULT_NOTIFY_MSG = ("info", "Click **Check Payroll Readiness** first, then **Execute Payroll**.", "")
+
+
+def _reset_local_run_state() -> None:
+    """Clear browser-session workflow state when switching users or signing out."""
+    ss.payroll_thread_started = False
+    ss.payroll_thread = None
+    ss.payroll_thread_user = None
+    ss.readiness_thread_started = False
+    ss.readiness_thread = None
+    ss.readiness_thread_user = None
+    ss.mfa_active = False
+    ss.mfa_submitted = False
+    ss.mfa_thank_you = False
+    ss.payroll_done = False
+    ss.pop("notify_msg", None)
+    ss["_last_bg_running"] = False
+    ss["mfa_code_input"] = ""
+    ss.pop("__pdf_cache", None)
+
+
+def _reset_user_backend_state(users_col, username: str | None) -> None:
+    """Reset per-user run state stored in Mongo when a browser session changes user."""
+    uname = _norm_username(username or "")
+    if users_col is None or not uname:
+        return
+    users_col.update_one(
+        {"username": uname},
+        {
+            "$set": {
+                "payroll.state": "idle",
+                "payroll.error": None,
+                "payroll.cancel_requested": True,
+                "payroll.updated_at": _now(),
+            },
+            "$unset": {
+                "mfa_code": "",
+                "readiness_status": "",
+            },
+        },
+    )
 
 
 # ── Date helpers ──────────────────────────────────────────────────────────────
@@ -196,6 +240,19 @@ def _friendly_error(err: str | None) -> str:
     msg        = str(err).strip()
     first_line = msg.splitlines()[0].strip()
     low        = msg.lower()
+
+    if "traceback" in low or "file \"" in low or "playwright" in low or "locator" in low:
+        if "salondata" in low:
+            return "SalonData could not complete the request. Check the SalonData password and try again."
+        if "heartland" in low:
+            return "Heartland could not complete the request. Check the Heartland password/MFA and try again."
+        return "The automation hit a website error. Please try again."
+    if "timeout" in low or "timed out" in low:
+        return "The website took too long to respond. Try again in a few minutes."
+    if "cancelled because the user signed out" in low:
+        return "The run was stopped because the account changed. Start a fresh run."
+    if first_line.lower().startswith(("runtimeerror", "exception", "error refreshing", "calledprocesserror")):
+        return "Something went wrong during payroll processing. Please try again."
 
     if "missing salondata credentials" in low:
         return "SalonData is not connected. Complete Setup with your SalonData username and password."
@@ -424,6 +481,7 @@ def _set_readiness_status(users_col, username: str, state: str, *, error=None, m
 def _clear_readiness_state(users_col=None, username: str | None = None):
     ss.readiness_thread_started = False
     ss.readiness_thread         = None
+    ss.readiness_thread_user    = None
     if users_col is not None and username:
         users_col.update_one({"username": _norm_username(username)}, {"$unset": {"readiness_status": ""}})
 
@@ -469,6 +527,7 @@ def _start_readiness_thread(users_col, username: str, period_end_date):
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
     ss.readiness_thread         = t
+    ss.readiness_thread_user    = _norm_username(username)
     ss.readiness_thread_started = True
 
 
@@ -493,11 +552,11 @@ with st.sidebar:
     if ss.auth_user:
         st.write(f"Signed in as **{ss.auth_user}**")
         if st.button("Sign out", use_container_width=True, key="btn_signout"):
-            _clear_readiness_state(users, ss.auth_user)
+            old_user = ss.auth_user
+            _reset_user_backend_state(users, old_user)
             ss.auth_user              = None
             ss.onboarding_mode        = False
-            ss.payroll_thread_started = False
-            ss.payroll_thread         = None
+            _reset_local_run_state()
             st.rerun()
     else:
         st.caption("Sign in to continue.")
@@ -507,6 +566,70 @@ with st.sidebar:
 #  LOGIN  — native HTML form so Chrome shows credential picker on username click
 # ═════════════════════════════════════════════════════════════════════════════
 if not ss.auth_user:
+    st.subheader("Sign in")
+    ss.setdefault("login_error", "")
+
+    if ss.login_error:
+        st.error(ss.login_error)
+
+    with st.form("login_form", clear_on_submit=False):
+        username = st.text_input(
+            "Username",
+            placeholder="you@example.com",
+            autocomplete="username",
+            key="login_username",
+        )
+        password = st.text_input(
+            "Password",
+            type="password",
+            placeholder="Enter your portal password",
+            autocomplete="current-password",
+            key="login_password",
+        )
+        submitted = st.form_submit_button("Continue", use_container_width=True)
+
+    if submitted:
+        username = username.strip()
+        ss.login_error = ""
+
+        if not username:
+            ss.login_error = "Please enter your username."
+            st.rerun()
+
+        if not password:
+            ss.login_error = "Please enter your password."
+            st.rerun()
+
+        user = _mongo_get_user(users, username)
+
+        if not user:
+            if not ALLOW_SELF_SIGNUP:
+                _mongo_log_login_attempt(login_events, username, password, success=False)
+                ss.login_error = "Account not found. Contact your admin to request access."
+                st.rerun()
+            user = _mongo_upsert_username_only(users, username)
+
+        if _is_disabled(user):
+            _mongo_log_login_attempt(login_events, username, password, success=False)
+            ss.login_error = "Your account is disabled. Contact your admin."
+            st.rerun()
+
+        ok, _ = _mongo_verify_password(users, username, password)
+        if not ok:
+            _mongo_log_login_attempt(login_events, username, password, success=False)
+            ss.login_error = "Incorrect password."
+            st.rerun()
+
+        ss.auth_user = user["username"]
+        ss.login_error = ""
+        _reset_user_backend_state(users, ss.auth_user)
+        _reset_local_run_state()
+        users.update_one({"username": ss.auth_user}, {"$set": {"last_login_at": _now()}})
+        _mongo_log_login_attempt(login_events, username, password, success=True)
+        st.rerun()
+
+    st.stop()
+
     import os as _os, tempfile as _tempfile
     import streamlit.components.v1 as _cv1
 
@@ -514,7 +637,7 @@ if not ss.auth_user:
     # credential picker on the username field (matching Auris Payroll behaviour).
     # st.components.v1.declare_component renders a full iframe with its own DOM
     # so Chrome treats it as a proper login form.
-    _COMP_DIR = _os.path.join(_tempfile.gettempdir(), "payroll_login_comp_v3")
+    _COMP_DIR = _os.path.join(_tempfile.gettempdir(), "payroll_login_comp_v4")
     _os.makedirs(_COMP_DIR, exist_ok=True)
     _COMP_HTML_PATH = _os.path.join(_COMP_DIR, "index.html")
 
@@ -529,42 +652,47 @@ if not ss.auth_user:
   html, body {
     background: #ffffff;
     color: #31333f;
+    min-height: 260px;
+  }
+  form {
+    width: min(100%, 520px);
   }
   label {
     display: block;
     font-size: 0.875rem;
     color: #31333f;
-    margin: 16px 0 6px;
-    font-weight: 400;
+    margin: 18px 0 7px;
+    font-weight: 600;
   }
   input {
     width: 100%;
-    padding: 8px 12px;
+    min-height: 44px;
+    padding: 10px 12px;
     background: #ffffff;
-    border: 1px solid #d0d3da;
+    border: 1px solid #9ca3af;
     border-radius: 6px;
     color: #31333f;
-    font-size: 0.95rem;
+    font-size: 1rem;
     outline: none;
     transition: border-color 0.15s, box-shadow 0.15s;
   }
-  input::placeholder { color: #adb5bd; }
+  input::placeholder { color: #6b7280; }
 
   /* ── Dark mode ── */
   @media (prefers-color-scheme: dark) {
     html, body { background: #0e1117; color: #fafafa; }
     label { color: #fafafa; }
     input {
-      background: transparent;
-      border-color: rgba(250,250,250,0.2);
+      background: #171b24;
+      border-color: #6b7280;
       color: #fafafa;
     }
-    input::placeholder { color: rgba(250,250,250,0.35); }
+    input::placeholder { color: rgba(250,250,250,0.68); }
   }
 
   body {
     font-family: "Source Sans Pro", -apple-system, sans-serif;
-    padding: 4px 2px 8px;
+    padding: 4px 2px 16px;
   }
   label:first-of-type { margin-top: 0; }
   input:focus {
@@ -584,6 +712,7 @@ if not ss.auth_user:
   button {
     margin-top: 18px;
     width: 100%;
+    min-height: 44px;
     padding: 10px;
     background: #ff4b4b;
     color: white;
@@ -659,14 +788,14 @@ if not ss.auth_user:
 </body>
 </html>"""
 
-    with open(_COMP_HTML_PATH, "w") as _f:
+    with open(_COMP_HTML_PATH, "w", encoding="utf-8") as _f:
         _f.write(_COMP_HTML)
 
-    _login_component = _cv1.declare_component("payroll_login_v3", path=_COMP_DIR)
+    _login_component = _cv1.declare_component("payroll_login_v4", path=_COMP_DIR)
 
     st.subheader("Sign in")
     ss.setdefault("login_error", "")
-    result = _login_component(error=ss.login_error, key="login_comp", height=240)
+    result = _login_component(error=ss.login_error, key="login_comp", height=320)
 
     # The component persists its last submitted value across every rerun, so we
     # guard with a timestamp: only process a submission we haven't seen before.
@@ -942,7 +1071,7 @@ ss.setdefault("mfa_active",    False)
 ss.setdefault("mfa_submitted", False)
 ss.setdefault("payroll_done",  False)
 ss.setdefault("mfa_thank_you", False)   # True for one render after Submit MFA
-ss.setdefault("notify_msg",    ("info", "Click **Check Payroll Readiness** first, then **Execute Payroll**.", ""))
+ss.pop("notify_msg", None)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -973,18 +1102,28 @@ r_state          = str(readiness_status.get("state") or "").strip().lower()
 r_missing        = readiness_status.get("missing_keys") or []
 r_error          = readiness_status.get("error")
 r_csv            = readiness_status.get("csv_path")
+r_updated        = float(readiness_status.get("updated_at") or 0)
 
 payroll_doc = latest_user.get("payroll") or {}
 p_state     = str(payroll_doc.get("state") or "").strip().lower()
 p_err       = payroll_doc.get("error")
+p_updated   = float(payroll_doc.get("updated_at") or 0)
 
 readiness_thread = ss.get("readiness_thread", None)
 payroll_thread   = ss.get("payroll_thread",   None)
-readiness_running = bool(readiness_thread and readiness_thread.is_alive())
-payroll_running   = bool(payroll_thread   and payroll_thread.is_alive())
+current_user = _norm_username(ss.auth_user)
+readiness_thread_owned = ss.get("readiness_thread_user") == current_user
+payroll_thread_owned = ss.get("payroll_thread_user") == current_user
+readiness_thread_alive = bool(readiness_thread_owned and readiness_thread and readiness_thread.is_alive())
+payroll_thread_alive = bool(payroll_thread_owned and payroll_thread and payroll_thread.is_alive())
+readiness_running = readiness_thread_alive or r_state in ("running", "syncing_keys")
+payroll_running = payroll_thread_alive or p_state in ("running", "awaiting_mfa")
+now_ts = _now()
+readiness_stale = r_state in ("running", "syncing_keys") and r_updated and (now_ts - r_updated > 900)
+payroll_stale = p_state in ("running", "awaiting_mfa") and p_updated and (now_ts - p_updated > 900)
 
 # ── Auto-clear stale "running" readiness when no live thread owns it ──────────
-if r_state in ("running", "syncing_keys") and not readiness_running:
+if False and r_state in ("running", "syncing_keys") and not readiness_running:
     try:
         _clear_readiness_state(users, ss.auth_user)
     except Exception:
@@ -999,7 +1138,7 @@ payroll_just_finished = (
 )
 
 # Clear stale payroll "running" in Mongo when thread is gone
-if p_state == "running" and not payroll_running:
+if False and p_state == "running" and not payroll_running:
     try:
         users.update_one(
             {"username": ss.auth_user},
@@ -1010,9 +1149,10 @@ if p_state == "running" and not payroll_running:
     p_state = "idle"
 
 # When the payroll thread finishes, lock the Execute button and reset MFA state
-if ss.payroll_thread_started and not payroll_running:
+if ss.payroll_thread_started and payroll_thread_owned and not payroll_thread_alive:
     ss.payroll_thread_started = False
     ss.payroll_thread         = None
+    ss.payroll_thread_user    = None
     ss.mfa_active             = False
     ss.mfa_submitted          = False
     ss.payroll_done           = True   # locks Execute Payroll for this session
@@ -1027,10 +1167,10 @@ st.subheader("▶️ Actions")
 #   Check Readiness  → disabled only while readiness check is actively running
 #   Execute Payroll  → disabled if: not ready, payroll running, OR already done this session
 is_ready        = (r_state == "ready")
-check_disabled  = (readiness_running or not is_valid_friday)
+check_disabled  = (readiness_thread_alive or not is_valid_friday)
 run_disabled    = (
     not is_ready
-    or payroll_running
+    or payroll_thread_alive
     or ss.payroll_done
     or not is_valid_friday
 )
@@ -1050,12 +1190,15 @@ run_clicked = c2.button(
 )
 
 # ── Notification: render immediately from session state (no blank-frame blink) ─
+_current_notify = DEFAULT_NOTIFY_MSG
+
 def _notify(kind: str, msg: str, caption: str = ""):
     """Store message — rendered at top of NEXT render cycle with no blank gap."""
-    ss.notify_msg = (kind, msg, caption)
+    global _current_notify
+    _current_notify = (kind, msg, caption)
 
 def _render_notify():
-    _nm = ss.get("notify_msg") or ("info", "Click **Check Payroll Readiness** first, then **Execute Payroll**.", "")
+    _nm = _current_notify
     kind, msg, caption = _nm
     if kind == "info":
         st.info(msg)
@@ -1068,25 +1211,32 @@ def _render_notify():
     if caption:
         st.caption(caption)
 
-_render_notify()
-
 # ── Handle Check Readiness click ──────────────────────────────────────────────
 if check_clicked:
     ss.payroll_done  = False   # allow Execute again after a fresh readiness check
     ss.mfa_active    = False
     ss.mfa_submitted = False
     ss.mfa_thank_you = False
+    _reset_user_backend_state(users, ss.auth_user)
     _clear_readiness_state(users, ss.auth_user)
     users.update_one({"username": ss.auth_user}, {"$unset": {"mfa_code": ""}})
     _start_readiness_thread(users, ss.auth_user, selected_payroll_date)
+    r_state = "running"
+    readiness_running = True
     # Do NOT block or loop here — let the auto-refresh below pick up state changes
 
 # ── Handle Execute Payroll click ──────────────────────────────────────────────
 if run_clicked:
+    _reset_user_backend_state(users, ss.auth_user)
     users.update_one({"username": ss.auth_user}, {"$unset": {"mfa_code": ""}})
     users.update_one(
         {"username": ss.auth_user},
-        {"$set": {"payroll.state": "running", "payroll.error": None, "payroll.updated_at": _now()}},
+        {"$set": {
+            "payroll.state": "running",
+            "payroll.error": None,
+            "payroll.cancel_requested": False,
+            "payroll.updated_at": _now(),
+        }},
     )
     _clear_readiness_state(users, ss.auth_user)
     ss.mfa_active    = True
@@ -1101,8 +1251,10 @@ if run_clicked:
     t = threading.Thread(target=_payroll_worker, args=(ss.auth_user, selected_payroll_date), daemon=True)
     t.start()
     ss.payroll_thread         = t
+    ss.payroll_thread_user    = _norm_username(ss.auth_user)
     ss.payroll_thread_started = True
     payroll_running           = True   # reflect immediately this render
+    p_state                   = "running"
 
 # ── Render the single status message ─────────────────────────────────────────
 # Re-read payroll state for accurate display after any click above.
@@ -1118,15 +1270,23 @@ _rlatest = _latest.get("readiness_status") or {}
 _rs_sub  = str(_rlatest.get("substate") or "").strip().lower()   # "awaiting_mfa" if backend writes it
 
 # ── Payroll execution messages ────────────────────────────────────────────────
-if payroll_running or _ps == "running":
+if payroll_stale:
+    _notify("error", "❌ Payroll timed out. Start a fresh run or sign out and back in.")
+elif readiness_stale:
+    _notify("error", "❌ Readiness check timed out. Click **Check Payroll Readiness** to start fresh.")
+elif _ps == "failed" or (_pe and _ps != "completed"):
+    _notify("error", f"❌ Payroll failed: {_friendly_error(_pe)}")
+elif r_state == "failed":
+    _notify("error", f"❌ {_friendly_error(r_error) or 'Readiness check failed.'}")
+elif _ps == "awaiting_mfa":
+    _notify("warning", "🔐 Please enter your MFA code now")
+elif payroll_running or _ps == "running":
     if ss.mfa_thank_you:
         # Flash "Thank you" for exactly one render cycle, then transition to finishing
         _notify("success", "✅ Thank you — MFA received. Finishing up…")
         ss.mfa_thank_you = False
     elif ss.mfa_submitted:
         _notify("info", "⚙️ Finishing execution — uploading to Heartland…")
-    elif _ps == "awaiting_mfa":
-        _notify("warning", "🔐 Please enter your MFA code now")
     else:
         _notify("info", "⏳ Executing payroll…")
 
@@ -1168,10 +1328,10 @@ elif r_state == "ready":
 elif r_state == "not_ready":
     _notify("error", f"❌ {_friendly_error(r_error) or 'Payroll is not ready.'}",
             caption=("Missing keys: " + ", ".join(r_missing)) if r_missing else "")
-elif r_state == "failed":
-    _notify("error", f"❌ {_friendly_error(r_error) or 'Readiness check failed.'}")
 else:
     _notify("info", "Click **Check Payroll Readiness** first, then **Execute Payroll**.")
+
+_render_notify()
 
 st.divider()
 
@@ -1372,8 +1532,10 @@ with st.expander("🔑 Update passwords", expanded=False):
 _rt = ss.get("readiness_thread", None)
 _pt = ss.get("payroll_thread", None)
 _bg_running = (
-    (_rt is not None and _rt.is_alive())
-    or (_pt is not None and _pt.is_alive())
+    readiness_running
+    or payroll_running
+    or (_rt is not None and ss.get("readiness_thread_user") == current_user and _rt.is_alive())
+    or (_pt is not None and ss.get("payroll_thread_user") == current_user and _pt.is_alive())
 )
 
 _thread_just_died = ss.get("_last_bg_running", False) and not _bg_running
@@ -1384,5 +1546,3 @@ if _thread_just_died:
 elif _bg_running:
     if st_autorefresh is not None:
         st_autorefresh(interval=2500, key="bg_status_refresh")
-    elif st.button("Refresh run status", use_container_width=True, key="btn_refresh_run_status"):
-        st.rerun()

@@ -1,18 +1,19 @@
-streamlit==1.31.0
-pandas==2.0.3
-numpy==1.24.3
-plotly==5.15.0
-openpyxl==3.1.2
-python-dateutil==2.8.2
-pytz==2023.3.post1
-pymongo==4.6.0
-cryptography==41.0.7
-playwright==1.49.0
-python-dotenv==1.0.0
-reportlab==4.0.4
-httpx>=0.27.0
-google-generativeai
-Pillow
+streamlit==1.57.0
+streamlit-autorefresh==1.0.1
+pandas==3.0.3
+numpy==2.4.5
+plotly==6.7.0
+openpyxl==3.1.5
+python-dateutil==2.9.0.post0
+pytz==2026.2
+pymongo==4.17.0
+cryptography==48.0.0
+playwright==1.59.0
+python-dotenv==1.2.2
+reportlab==4.5.1
+httpx==0.28.1
+google-generativeai==0.8.6
+Pillow==12.2.0
 
 
 

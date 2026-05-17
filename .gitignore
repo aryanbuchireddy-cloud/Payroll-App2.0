@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Streamlit
+.streamlit/secrets.toml
+.streamlit/.streamlit/secrets.toml
+.streamlit/cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local secrets/config
+.env
+*.log
+*.db
+
+# Generated payroll artifacts
+payroll_runs/
+payroll_pdfs/
+heartland_employee_ids.xlsx
+Cleaned_Heartland_Ready_Payroll.csv
+*.trace.zip
+playwright-trace.zip

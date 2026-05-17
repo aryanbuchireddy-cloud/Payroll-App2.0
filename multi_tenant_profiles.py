@@ -550,10 +550,53 @@ async def _smart_pick_with_optional_handyman(
 
 async def _screen_seems_like_selection(page: Page) -> bool:
     txt = (await _visible_text(page)).lower()
+    url = ""
+    try:
+        url = (page.url or "").lower()
+    except Exception:
+        pass
+
     if _screen_seems_like_mfa(txt):
         return False
-    clues = ["continue", "select", "profile", "client", "company", "partner user", "great clips"]
-    return any(c in txt for c in clues)
+
+    explicit_selection_clues = [
+        "select a profile to log into",
+        "multiaccountselection",
+        "multi - client",
+        "go to client",
+        "dashboardpartial/multiclient",
+        "payroll-multiaccountselection",
+        "payroll-dashboard-multiclient",
+    ]
+    return any(c in txt or c in url for c in explicit_selection_clues)
+
+
+async def _screen_seems_like_heartland_home(page: Page) -> bool:
+    txt = (await _visible_text(page)).lower()
+    url = ""
+    try:
+        url = (page.url or "").lower()
+    except Exception:
+        pass
+
+    if _screen_seems_like_mfa(txt) or await _screen_seems_like_selection(page):
+        return False
+
+    home_url_clues = [
+        "/dashboard",
+        "/reports/",
+        "/payroll/",
+        "/hr/",
+    ]
+    home_text_clues = [
+        "welcome",
+        "general",
+        "dashboard",
+        "payroll",
+        "reports",
+        "time card",
+    ]
+    return any(c in url for c in home_url_clues) or any(c in txt for c in home_text_clues)
 
 
 def _screen_seems_like_mfa(body_text: str) -> bool:
@@ -621,6 +664,10 @@ async def handle_heartland_post_login_selection_flow(
                 "profile": tenant.raw,
             }
 
+        if await _screen_seems_like_heartland_home(page):
+            await log_event("done", "Heartland post-login page detected before more selection.")
+            return {"ok": True, "reason": "completed", "events": events, "profile": tenant.raw}
+
         did_something = False
 
         profile_pick = tenant.profile_pick
@@ -664,7 +711,12 @@ async def handle_heartland_post_login_selection_flow(
             await page.wait_for_timeout(tenant.wait_after_click_ms)
 
         still_selection = await _screen_seems_like_selection(page)
+        looks_home = await _screen_seems_like_heartland_home(page)
         print(f"🧪 round={round_num}, did_something={did_something}, still_selection={still_selection}, url={page.url}")
+
+        if looks_home:
+            await log_event("done", "Heartland post-login page detected after selection.")
+            return {"ok": True, "reason": "completed", "events": events, "profile": tenant.raw}
 
         if not did_something and not still_selection:
             await log_event("done", "No more Heartland selection screens detected.")

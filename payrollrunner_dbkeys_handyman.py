@@ -146,6 +146,9 @@ async def _wait_for_mfa_code(username: str, *, timeout_sec: int = 600, poll_sec:
 
     while time.time() < deadline:
         doc = _get_user_doc(username) or {}
+        payroll_state = doc.get("payroll") if isinstance(doc.get("payroll"), dict) else {}
+        if payroll_state.get("cancel_requested"):
+            raise RuntimeError("Payroll run was cancelled because the user signed out or switched accounts.")
         raw = str(doc.get("mfa_code") or "").strip()
         code = re.sub(r"\D+", "", raw)
 
@@ -359,6 +362,12 @@ def _friendly_error_message(err) -> str:
     s = str(err or "").strip()
     s_low = s.lower()
 
+    if "traceback" in s_low or "file \"" in s_low or "playwright" in s_low or "locator" in s_low:
+        if "salondata" in s_low:
+            return "SalonData could not complete the request. Check the SalonData password and try again."
+        if "heartland" in s_low:
+            return "Heartland could not complete the request. Check the Heartland password/MFA and try again."
+        return "The automation hit a website error. Please try again."
     if "heartland mfa" in s_low:
         return s
     if "missing salondata credentials" in s_low or "missing salondata" in s_low:
@@ -367,6 +376,8 @@ def _friendly_error_message(err) -> str:
         return "Heartland is not connected for this portal account. Please go to Setup and save your Heartland username/password."
     if "timeout" in s_low:
         return "The website took too long to respond. This is usually a wrong password, a site outage, or a slow connection. Please try again (and update your password if it recently changed)."
+    if "cancelled because the user signed out" in s_low:
+        return "The run was stopped because the account changed. Start a fresh run."
     if "mfa" in s_low and ("missing" in s_low or "not found" in s_low):
         return "Heartland MFA code is required. Please enter the 6-digit code and try again."
     if "no view" in s_low and ("icon" in s_low or "icons" in s_low):
@@ -375,6 +386,8 @@ def _friendly_error_message(err) -> str:
         return "Employee ID report format changed in Heartland (could not find the expected columns)."
     if ("pdf" in s_low and "not found" in s_low) or ("filenotfounderror" in s_low):
         return "Payroll PDF could not be generated or found. Please run again, and contact support if it keeps happening."
+    if s.splitlines()[0].lower().startswith(("runtimeerror", "exception", "calledprocesserror")):
+        return "Something went wrong during payroll processing. Please try again."
 
     return s
 
@@ -922,7 +935,28 @@ async def _heartland_login(page: Page, hl_user: str, hl_pass: str, username: str
     except Exception:
         pass
 
-    mfa_code = await _wait_for_mfa_code(username, timeout_sec=600, poll_sec=2.0)
+    try:
+        mfa_code = await _wait_for_mfa_code(username, timeout_sec=600, poll_sec=2.0)
+    except Exception as e:
+        msg = _friendly_error_message(e)
+        try:
+            _get_users_collection().update_one(
+                {"username": username},
+                {
+                    "$set": {
+                        "payroll.state": "failed",
+                        "payroll.error": msg,
+                        "payroll.updated_at": time.time(),
+                        "readiness_status.state": "failed",
+                        "readiness_status.error": msg,
+                        "readiness_status.updated_at": time.time(),
+                    },
+                    "$unset": {"readiness_status.substate": "", "mfa_code": ""},
+                },
+            )
+        except Exception:
+            pass
+        raise
 
     # Clear the awaiting_mfa substate now that the code has been received
     try:
@@ -1079,9 +1113,11 @@ async def _heartland_login(page: Page, hl_user: str, hl_pass: str, username: str
     )
     
     if not tenant_result.get("ok"):
+        last_screen = str(tenant_result.get("last_screen_text") or "").strip()
         raise RuntimeError(
             "Heartland profile/client selection failed: "
             + str(tenant_result.get("reason"))
+            + (f". Last screen: {last_screen[:500]}" if last_screen else "")
         )
 
     #await _maybe_select_multi_account(page, username)
@@ -1478,6 +1514,11 @@ def _parse_employee_excel_to_df(excel_path: str) -> pd.DataFrame:
 # ---------- Heartland employee keys refresh (Mongo-based) ----------
 def refresh_employee_keys_from_heartland(username: str) -> dict:
     try:
+        _get_users_collection().update_one(
+            {"username": (username or "").lower().strip()},
+            {"$set": {"payroll.cancel_requested": False}},
+            upsert=True,
+        )
         hl_user, hl_pass = _get_vendor_creds(username, "heartland")
 
         if os.name == "nt":
@@ -1486,7 +1527,7 @@ def refresh_employee_keys_from_heartland(username: str) -> dict:
         async def _inner():
             async with async_playwright() as p:
                 _sys_chromium = __import__('shutil').which('chromium') or __import__('shutil').which('chromium-browser')
-                browser = await p.chromium.launch(headless=True, slow_mo=50, **({'executable_path': _sys_chromium} if _sys_chromium else {}))
+                browser = await p.chromium.launch(headless=False, slow_mo=50, **({'executable_path': _sys_chromium} if _sys_chromium else {}))
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
                 excel_path = await _download_employee_excel_from_heartland(page, hl_user, hl_pass, username)
@@ -2170,6 +2211,11 @@ async def upload_to_heartland(page: Page, file_path: str, hl_user: str, hl_pass:
 # ---------- Readiness check ----------
 def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_end_date=None) -> dict:
     try:
+        _get_users_collection().update_one(
+            {"username": (username or "").lower().strip()},
+            {"$set": {"payroll.cancel_requested": False}, "$unset": {"mfa_code": ""}},
+            upsert=True,
+        )
         sd_user, sd_pass = _get_vendor_creds(username, "salondata")
 
         if os.name == "nt":
@@ -2177,7 +2223,7 @@ def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_en
 
         async def _inner_salondata():
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True, slow_mo=50)
+                browser = await p.chromium.launch(headless=False, slow_mo=50)
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
                 run_ctx = make_user_run_context(username)
@@ -2241,7 +2287,7 @@ def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_en
 # ---------- Orchestration for Streamlit ----------
 async def _full_agentic_flow_inner(sd_user, sd_pass, hl_user, hl_pass, username, period_end_date=None, csv_path_prefetched=None) -> dict:
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, slow_mo=50)
+        browser = await p.chromium.launch(headless=False, slow_mo=50)
         context = await browser.new_context(accept_downloads=True)
         page = await context.new_page()
         run_ctx = make_user_run_context(username)
@@ -2310,6 +2356,11 @@ async def _full_agentic_flow_inner(sd_user, sd_pass, hl_user, hl_pass, username,
 
 def run_payroll_for_user(username: str, period_end_date=None) -> dict:
     try:
+        _get_users_collection().update_one(
+            {"username": (username or "").lower().strip()},
+            {"$set": {"payroll.cancel_requested": False}, "$unset": {"mfa_code": ""}},
+            upsert=True,
+        )
         _update_payroll_status(username, "running")
         sd_user, sd_pass = _get_vendor_creds(username, "salondata")
         hl_user, hl_pass = _get_vendor_creds(username, "heartland")
@@ -2333,10 +2384,11 @@ def run_payroll_for_user(username: str, period_end_date=None) -> dict:
 
     except Exception as e:
         msg = str(e).strip() or f"{type(e).__name__} (no message). See console for traceback."
-        _update_payroll_status(username, "failed", error=msg)
+        friendly_msg = _friendly_error_message(msg)
+        _update_payroll_status(username, "failed", error=friendly_msg)
         print("❌ run_payroll_for_user failed:", repr(e))
         traceback.print_exc()
-        raise RuntimeError(_friendly_error_message(msg)) from e
+        raise RuntimeError(friendly_msg) from e
 
 
 if __name__ == "__main__":

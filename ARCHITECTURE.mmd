@@ -1,0 +1,41 @@
+flowchart TD
+    User["User in Browser"] --> UI["Streamlit App<br/>tester8_admin_handyman.py"]
+
+    UI --> Auth["Login + Admin UI<br/>users, roles, setup"]
+    UI --> Mongo["MongoDB<br/>userInfo, employeeKeysByUser,<br/>loginEvents, PDF metadata"]
+    UI --> Secrets["Streamlit Secrets / Env Vars<br/>Mongo URI, encryption key,<br/>Gemini key"]
+
+    Auth --> Crypto["crypto_utils.py<br/>encrypt/decrypt saved vendor passwords"]
+    Crypto --> Mongo
+
+    UI --> Readiness["Check Payroll Readiness<br/>background thread"]
+    UI --> Execute["Execute Payroll<br/>background thread"]
+    UI --> MFA["MFA Code Box<br/>writes mfa_code to Mongo"]
+
+    Readiness --> Runner["Payroll Runner<br/>payrollrunner_dbkeys_handyman.py"]
+    Execute --> Runner
+    MFA --> Mongo
+
+    Runner --> RunCtx["Per-Run Folder<br/>run_context.py<br/>payroll_runs/user/run_id"]
+    Runner --> SalonData["SalonData Website<br/>Playwright downloads payroll CSV"]
+    Runner --> Heartland["Heartland Website<br/>Playwright login, MFA,<br/>tenant/client selection, upload"]
+
+    Runner --> Profiles["Tenant Profiles<br/>multi_tenant_profiles.py<br/>parser + Heartland selections"]
+    Profiles --> Mongo
+
+    Runner --> Gemini["Optional Gemini Vision Helper<br/>vision_handyman_agent.py<br/>fallback clicks for flaky pages"]
+
+    SalonData --> CSV["SalonData Payroll CSV"]
+    Heartland --> EmployeeReport["Heartland Employee ID Report"]
+    CSV --> Keys["Employee Key Matching<br/>employeeKeysByUser"]
+    EmployeeReport --> Keys
+    Keys --> Mongo
+
+    Runner --> PDF["Combined Payroll PDF<br/>ReportLab"]
+    Runner --> UploadCSV["Formatted Heartland CSV"]
+
+    UploadCSV --> Heartland
+    PDF --> GridFS["Mongo GridFS<br/>stored payroll PDFs"]
+    GridFS --> UI
+    UI --> Download["Download PDF Button"]
+    Download --> User
