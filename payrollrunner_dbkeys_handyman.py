@@ -5,6 +5,7 @@ import csv
 import re
 import traceback
 import pandas as pd
+import uuid
 
 from dotenv import load_dotenv
 from typing import Optional, Tuple, List, Dict, Any
@@ -92,6 +93,12 @@ def _coerce_date(value) -> date:
 # ---------- Mongo helpers ----------
 _mongo_client_cache: MongoClient | None = None
 
+def _norm_username(username: str) -> str:
+    return (username or "").lower().strip()
+
+def _new_run_id() -> str:
+    return uuid.uuid4().hex
+
 def _get_mongo_client() -> MongoClient:
     global _mongo_client_cache
     if _mongo_client_cache is None:
@@ -136,11 +143,80 @@ def _get_handyman_agent():
 
 
 
-async def _wait_for_mfa_code(username: str, *, timeout_sec: int = 600, poll_sec: float = 2.0) -> str:
+def _flow_run_filter(username: str, flow: str, run_id: str | None) -> dict:
+    base = {"username": _norm_username(username)}
+    if run_id:
+        if flow == "readiness":
+            base["readiness_status.run_id"] = run_id
+        else:
+            base["payroll.run_id"] = run_id
+    return base
+
+def _set_mfa_status(username: str, *, flow: str, run_id: str | None, status: str, code: str | None = None, error: str | None = None) -> None:
+    now = time.time()
+    sets = {
+        "mfa.flow": flow,
+        "mfa.run_id": run_id,
+        "mfa.status": status,
+        "mfa.updated_at": now,
+    }
+    unsets = {}
+    if status == "submitted":
+        sets["mfa.submitted_at"] = now
+    if code is not None:
+        sets["mfa.code"] = code
+    if error:
+        sets["mfa.error"] = error
+    elif status in ("awaiting_mfa", "submitted", "accepted", "post_mfa_running"):
+        unsets["mfa.error"] = ""
+    if status in ("accepted", "post_mfa_running", "failed", "timeout", "cancelled"):
+        unsets["mfa.code"] = ""
+    update = {"$set": sets}
+    if unsets:
+        update["$unset"] = unsets
+    _get_users_collection().update_one({"username": _norm_username(username)}, update, upsert=True)
+
+def _set_flow_mfa_state(username: str, *, flow: str, run_id: str | None, state: str | None = None, substate: str | None = None, error: str | None = None) -> None:
+    now = time.time()
+    if flow == "readiness":
+        sets = {
+            "readiness_status.updated_at": now,
+            "readiness_status.run_id": run_id,
+        }
+        if state is not None:
+            sets["readiness_status.state"] = state
+        if substate is not None:
+            sets["readiness_status.substate"] = substate
+        if error is not None:
+            sets["readiness_status.error"] = error
+        _get_users_collection().update_one(_flow_run_filter(username, flow, run_id), {"$set": sets}, upsert=not bool(run_id))
+        return
+
+    sets = {
+        "payroll.updated_at": now,
+        "payroll.run_id": run_id,
+    }
+    if state is not None:
+        sets["payroll.state"] = state
+    if error is not None:
+        sets["payroll.error"] = error
+    _get_users_collection().update_one(_flow_run_filter(username, flow, run_id), {"$set": sets}, upsert=not bool(run_id))
+
+def _clear_mfa_prompt(username: str, *, flow: str, run_id: str | None) -> None:
+    unset = {"mfa.code": "", "mfa.error": ""}
+    if flow == "readiness":
+        unset["readiness_status.substate"] = ""
+    _get_users_collection().update_one(
+        _flow_run_filter(username, flow, run_id),
+        {"$unset": unset, "$set": {"mfa.updated_at": time.time()}},
+    )
+
+async def _wait_for_mfa_code(username: str, *, run_id: str | None = None, flow: str = "payroll", timeout_sec: int = 600, poll_sec: float = 2.0) -> str:
     """
-    Wait for Heartland MFA code to appear in Mongo under user.mfa_code.
+    Wait for Heartland MFA code to appear in Mongo under user.mfa.code.
     Lets the user type the code in the Streamlit portal while automation waits.
     """
+    username = _norm_username(username)
     deadline = time.time() + timeout_sec
     last_log = 0.0
 
@@ -148,11 +224,23 @@ async def _wait_for_mfa_code(username: str, *, timeout_sec: int = 600, poll_sec:
         doc = _get_user_doc(username) or {}
         payroll_state = doc.get("payroll") if isinstance(doc.get("payroll"), dict) else {}
         if payroll_state.get("cancel_requested"):
+            _set_mfa_status(username, flow=flow, run_id=run_id, status="cancelled")
             raise RuntimeError("Payroll run was cancelled because the user signed out or switched accounts.")
-        raw = str(doc.get("mfa_code") or "").strip()
+        if run_id:
+            active = doc.get("readiness_status") if flow == "readiness" else doc.get("payroll")
+            active = active if isinstance(active, dict) else {}
+            if active.get("run_id") and active.get("run_id") != run_id:
+                _set_mfa_status(username, flow=flow, run_id=run_id, status="cancelled")
+                raise RuntimeError("Payroll run was cancelled because a newer run started.")
+        mfa_doc = doc.get("mfa") if isinstance(doc.get("mfa"), dict) else {}
+        if run_id and mfa_doc.get("run_id") not in (None, "", run_id):
+            await asyncio.sleep(poll_sec)
+            continue
+        raw = str(mfa_doc.get("code") or "").strip()
         code = re.sub(r"\D+", "", raw)
 
         if len(code) >= 6:
+            _set_mfa_status(username, flow=flow, run_id=run_id, status="submitted")
             return code[:6]
 
         if time.time() - last_log > 10:
@@ -161,9 +249,8 @@ async def _wait_for_mfa_code(username: str, *, timeout_sec: int = 600, poll_sec:
 
         await asyncio.sleep(poll_sec)
 
-    raise RuntimeError(
-        "Heartland MFA code is required. Please enter the 6-digit code in the portal and click 'Submit MFA'."
-    )
+    _set_mfa_status(username, flow=flow, run_id=run_id, status="timeout", error="Heartland MFA timed out.")
+    raise RuntimeError("Heartland MFA code is required. Please enter the 6-digit code in the portal and click 'Submit MFA'.")
 
 
 
@@ -205,12 +292,14 @@ def save_employee_keys_df(username: str, df: pd.DataFrame, source: str = "portal
     )
 
 
-def _update_payroll_status(username: str, state: str, error: Optional[str] = None) -> None:
+def _update_payroll_status(username: str, state: str, error: Optional[str] = None, run_id: str | None = None) -> None:
     col = _get_users_collection()
+    username = _norm_username(username)
+    query = _flow_run_filter(username, "payroll", run_id)
     doc = col.find_one({"username": username}, {"_id": 0}) or {}
     payroll = doc.get("payroll", {}) if isinstance(doc.get("payroll", {}), dict) else {}
-    payroll.update({"state": state, "error": error, "updated_at": time.time()})
-    col.update_one({"username": username}, {"$set": {"payroll": payroll}}, upsert=True)
+    payroll.update({"state": state, "error": error, "updated_at": time.time(), "run_id": run_id or payroll.get("run_id")})
+    col.update_one(query, {"$set": {"payroll": payroll}}, upsert=not bool(run_id))
 
 
 def _log_payroll_pdf_item(username: str, item: dict) -> None:
@@ -362,6 +451,11 @@ def _friendly_error_message(err) -> str:
     s = str(err or "").strip()
     s_low = s.lower()
 
+    if "winerror 5" in s_low or "access is denied" in s_low or "permissionerror" in s_low:
+        return (
+            "Windows blocked access to a local browser or payroll file. "
+            "Close extra Streamlit/Python windows and try again. If it keeps happening, restart the app."
+        )
     if "traceback" in s_low or "file \"" in s_low or "playwright" in s_low or "locator" in s_low:
         if "salondata" in s_low:
             return "SalonData could not complete the request. Check the SalonData password and try again."
@@ -903,7 +997,7 @@ def load_clean_biweekly_table_for_user(csv_path: str, username: str) -> pd.DataF
     return load_clean_biweekly_table(csv_path)
 
 # ---------- Heartland login + MFA ----------
-async def _heartland_login(page: Page, hl_user: str, hl_pass: str, username: str) -> None:
+async def _heartland_login(page: Page, hl_user: str, hl_pass: str, username: str, *, flow: str = "payroll", run_id: str | None = None) -> None:
     """
     Log into Heartland and complete MFA, ending on the Dashboard.
     Reused by employee Excel download and timecard upload.
@@ -920,50 +1014,35 @@ async def _heartland_login(page: Page, hl_user: str, hl_pass: str, username: str
     await page.wait_for_selector("input", timeout=600000)
     mfa_input = page.locator("input").first
 
-    # ── Signal portal that we are actively waiting for MFA ──────────────────
-    # Both fields written so the correct message shows whether this is a
-    # payroll run (portal checks payroll.state) or a key-sync
-    # (portal checks readiness_status.substate).
+    # Signal portal that this specific flow is actively waiting for MFA.
     try:
-        _get_users_collection().update_one(
-            {"username": username},
-            {"$set": {
-                "payroll.state": "awaiting_mfa",
-                "readiness_status.substate": "awaiting_mfa",
-            }},
-        )
+        if flow == "readiness":
+            _set_flow_mfa_state(username, flow=flow, run_id=run_id, substate="awaiting_mfa")
+        else:
+            _set_flow_mfa_state(username, flow=flow, run_id=run_id, state="awaiting_mfa")
+        _set_mfa_status(username, flow=flow, run_id=run_id, status="awaiting_mfa")
     except Exception:
         pass
 
     try:
-        mfa_code = await _wait_for_mfa_code(username, timeout_sec=600, poll_sec=2.0)
+        mfa_code = await _wait_for_mfa_code(username, run_id=run_id, flow=flow, timeout_sec=600, poll_sec=2.0)
     except Exception as e:
         msg = _friendly_error_message(e)
         try:
-            _get_users_collection().update_one(
-                {"username": username},
-                {
-                    "$set": {
-                        "payroll.state": "failed",
-                        "payroll.error": msg,
-                        "payroll.updated_at": time.time(),
-                        "readiness_status.state": "failed",
-                        "readiness_status.error": msg,
-                        "readiness_status.updated_at": time.time(),
-                    },
-                    "$unset": {"readiness_status.substate": "", "mfa_code": ""},
-                },
-            )
+            _set_flow_mfa_state(username, flow=flow, run_id=run_id, state="failed", error=msg)
+            _set_mfa_status(username, flow=flow, run_id=run_id, status="failed", error=msg)
+            _clear_mfa_prompt(username, flow=flow, run_id=run_id)
         except Exception:
             pass
         raise
 
-    # Clear the awaiting_mfa substate now that the code has been received
+    # Clear the prompt now that the backend has consumed the code.
     try:
-        _get_users_collection().update_one(
-            {"username": username},
-            {"$unset": {"readiness_status.substate": ""}},
-        )
+        if flow == "readiness":
+            _set_flow_mfa_state(username, flow=flow, run_id=run_id, substate="mfa_submitted")
+        else:
+            _set_flow_mfa_state(username, flow=flow, run_id=run_id, state="mfa_submitted")
+        _clear_mfa_prompt(username, flow=flow, run_id=run_id)
     except Exception:
         pass
     # ────────────────────────────────────────────────────────────────────────
@@ -1080,6 +1159,14 @@ async def _heartland_login(page: Page, hl_user: str, hl_pass: str, username: str
             print(f"Heartland MFA screen cleared after {elapsed_sec}s. URL={page.url}")
             if post_mfa_responses:
                 print(f"Heartland MFA final recent responses={post_mfa_responses[-8:]}")
+            try:
+                if flow == "readiness":
+                    _set_flow_mfa_state(username, flow=flow, run_id=run_id, substate="mfa_accepted")
+                else:
+                    _set_flow_mfa_state(username, flow=flow, run_id=run_id, state="mfa_accepted")
+                _set_mfa_status(username, flow=flow, run_id=run_id, status="accepted")
+            except Exception:
+                pass
             break
 
         if rejection_phrase:
@@ -1088,21 +1175,44 @@ async def _heartland_login(page: Page, hl_user: str, hl_pass: str, username: str
             print(f"Heartland MFA rejected page body={last_mfa_body[:1200]}")
             if post_mfa_responses:
                 print(f"Heartland MFA rejection recent responses={post_mfa_responses[-8:]}")
-            raise RuntimeError(
-                "Heartland MFA was rejected. Please request a fresh 6-digit code and submit it again."
-            )
+            msg = "Heartland rejected that code. Request a fresh 6-digit code and submit it again."
+            try:
+                if flow == "readiness":
+                    _set_flow_mfa_state(username, flow=flow, run_id=run_id, substate="awaiting_mfa", error=msg)
+                else:
+                    _set_flow_mfa_state(username, flow=flow, run_id=run_id, state="awaiting_mfa", error=msg)
+                _set_mfa_status(username, flow=flow, run_id=run_id, status="rejected", error=msg)
+            except Exception:
+                pass
+            raise RuntimeError(msg)
     else:
         print(f"⚠️ Heartland MFA still unresolved. URL={page.url}")
         print(f"⚠️ Heartland MFA page body={last_mfa_body[:800]}")
         if post_mfa_responses:
             print(f"Heartland MFA unresolved recent responses={post_mfa_responses[-8:]}")
-        raise RuntimeError(
+        msg = (
             "Heartland MFA did not finish after the code was submitted. "
             "Heartland is still showing the MFA verification screen, so the app stopped before tenant selection."
         )
+        try:
+            _set_flow_mfa_state(username, flow=flow, run_id=run_id, state="failed", error=msg)
+            _set_mfa_status(username, flow=flow, run_id=run_id, status="failed", error=msg)
+            _clear_mfa_prompt(username, flow=flow, run_id=run_id)
+        except Exception:
+            pass
+        raise RuntimeError(msg)
 
     try:
         await page.wait_for_load_state("networkidle", timeout=20000)
+    except Exception:
+        pass
+
+    try:
+        if flow == "readiness":
+            _set_flow_mfa_state(username, flow=flow, run_id=run_id, substate="post_mfa_running")
+        else:
+            _set_flow_mfa_state(username, flow=flow, run_id=run_id, state="post_mfa_running")
+        _set_mfa_status(username, flow=flow, run_id=run_id, status="post_mfa_running")
     except Exception:
         pass
 
@@ -1124,6 +1234,13 @@ async def _heartland_login(page: Page, hl_user: str, hl_pass: str, username: str
     #await _maybe_select_multi_client(page, username)
 
     await page.wait_for_selector(r"text=/\b(?:Welcome|General)\b/i", timeout=300000)
+    try:
+        if flow == "readiness":
+            _set_flow_mfa_state(username, flow=flow, run_id=run_id, substate="")
+        else:
+            _set_flow_mfa_state(username, flow=flow, run_id=run_id, state="running")
+    except Exception:
+        pass
     print("✅ Welcome page loaded.")
 
 
@@ -1328,7 +1445,7 @@ async def _open_employee_id_report_modal(page: Page, portal_username: str):
     raise RuntimeError("No view (eye) icons found for Heartland reports list.")
 
 
-async def _download_employee_excel_from_heartland(page: Page, hl_user: str, hl_pass: str, username: str) -> str:
+async def _download_employee_excel_from_heartland(page: Page, hl_user: str, hl_pass: str, username: str, *, run_id: str | None = None) -> str:
     async def _select_dropdown_report(label_text: str, option_text: str = None, option_index: int = 0):
         import re as _re
         field = page.locator("mat-form-field").filter(has_text=_re.compile(label_text, _re.I)).first
@@ -1360,7 +1477,7 @@ async def _download_employee_excel_from_heartland(page: Page, hl_user: str, hl_p
         await option.click(force=True)
         await page.wait_for_timeout(800)
 
-    await _heartland_login(page, hl_user, hl_pass, username)
+    await _heartland_login(page, hl_user, hl_pass, username, flow="readiness", run_id=run_id)
     await _open_employee_id_report_modal(page, username)
 
     print("⏳ Waiting for report modal to load…")
@@ -1445,35 +1562,56 @@ def _parse_employee_excel_to_df(excel_path: str) -> pd.DataFrame:
             None,
         )
         if status_col is not None:
+            status_series = df[status_col].fillna("").astype(str).str.strip().str.upper()
             df = df[
-                df[status_col]
-                .astype(str)
-                .str.strip()
-                .str.upper()
-                .eq("A")
+                status_series.isin(["", "A", "ACTIVE"])
             ]
 
+        cols = list(df.columns)
         emp_no_col = next(
-            c for c in df.columns
-            if "number" in str(c).lower()
-            or ("employee" in str(c).lower() and "#" in str(c).lower())
+            (
+                c for c in cols
+                if "number" in str(c).lower()
+                or ("employee" in str(c).lower() and "#" in str(c).lower())
+            ),
+            cols[0] if cols else None,
         )
-        first_col = next(c for c in df.columns if "first" in str(c).lower())
-        last_col = next(c for c in df.columns if "last" in str(c).lower())
+        first_col = next(
+            (c for c in cols if "first" in str(c).lower()),
+            cols[1] if len(cols) > 1 else None,
+        )
+        last_col = next(
+            (c for c in cols if "last" in str(c).lower()),
+            cols[3] if len(cols) > 3 else None,
+        )
         dept_col = next(
-            (c for c in df.columns
+            (c for c in cols
              if "department" in str(c).lower()
              or "dept" in str(c).lower()
              or "code" in str(c).lower()),
-            None,
+            cols[5] if len(cols) > 5 else None,
         )
 
         import pandas as _pd
 
-        def _clean_num_series(s: pd.Series) -> pd.Series:
-            nums = _pd.to_numeric(s, errors="coerce")
-            return nums.map(lambda x: "" if _pd.isna(x) else str(int(x)))
+        def _clean_employee_key_value(v) -> str:
+            try:
+                if v is None or _pd.isna(v):
+                    return ""
+            except Exception:
+                pass
+            s = str(v).strip()
+            if not s or s.lower() in {"nan", "none", "<na>", "null"}:
+                return ""
+            if re.fullmatch(r"\d+\.0", s):
+                s = s[:-2]
+            return re.sub(r"\s+", "", s)
 
+        def _clean_num_series(s: pd.Series) -> pd.Series:
+            return s.map(_clean_employee_key_value)
+
+        if emp_no_col is None or first_col is None or last_col is None:
+            raise RuntimeError("Could not identify employee number, first name, and last name columns.")
         key_series = _clean_num_series(df[emp_no_col])
 
         if dept_col is not None:
@@ -1512,7 +1650,7 @@ def _parse_employee_excel_to_df(excel_path: str) -> pd.DataFrame:
 
 
 # ---------- Heartland employee keys refresh (Mongo-based) ----------
-def refresh_employee_keys_from_heartland(username: str) -> dict:
+def refresh_employee_keys_from_heartland(username: str, run_id: str | None = None) -> dict:
     try:
         _get_users_collection().update_one(
             {"username": (username or "").lower().strip()},
@@ -1530,7 +1668,7 @@ def refresh_employee_keys_from_heartland(username: str) -> dict:
                 browser = await p.chromium.launch(headless=False, slow_mo=50, **({'executable_path': _sys_chromium} if _sys_chromium else {}))
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
-                excel_path = await _download_employee_excel_from_heartland(page, hl_user, hl_pass, username)
+                excel_path = await _download_employee_excel_from_heartland(page, hl_user, hl_pass, username, run_id=run_id)
                 await browser.close()
                 return _parse_employee_excel_to_df(excel_path)
 
@@ -1919,6 +2057,60 @@ def _emp_key(name: str) -> str:
     return s.lower().strip()
 
 
+def _employee_alias_keys(name: str) -> set[str]:
+    raw = (name or "").strip()
+    if not raw:
+        return set()
+
+    if "," in raw:
+        last, rest = raw.split(",", 1)
+        first = rest.strip().split()[0] if rest.strip() else ""
+        raw = f"{first} {last.strip()}".strip()
+
+    def _key(value: str) -> str:
+        value = re.sub(r"[^a-zA-Z0-9]+", " ", value or "")
+        return re.sub(r"\s+", " ", value).lower().strip()
+
+    aliases = {_key(raw)}
+    tokens = re.findall(r"[A-Za-z0-9]+", raw)
+    if len(tokens) >= 2:
+        aliases.add(_key(f"{tokens[0]} {tokens[-1]}"))
+        first = tokens[0].lower()
+        first_variants = {
+            "haley": ["hailey", "hayley"],
+            "hailey": ["haley", "hayley"],
+            "hayley": ["haley", "hailey"],
+        }.get(first, [])
+        for variant in first_variants:
+            aliases.add(_key(f"{variant} {tokens[-1]}"))
+    if len(tokens) >= 3:
+        # Covers Heartland names like "Sue Ellen Mathews" vs SalonData "Sue Mathews",
+        # and "Tami Reynolds-Ray" vs "Tami Reynolds".
+        aliases.add(_key(f"{tokens[0]} {tokens[1]}"))
+
+    return {a for a in aliases if a}
+
+
+def _employee_key_lookup(keys_df: pd.DataFrame) -> dict[str, str]:
+    keys_df = _clean_keys_df(keys_df)
+    lookup: dict[str, str] = {}
+    for _, row in keys_df.iterrows():
+        key = str(row.get("Key") or "").strip()
+        if not key or key.lower() in {"nan", "none", "<na>"}:
+            continue
+        for alias in _employee_alias_keys(str(row.get("Employee") or "")):
+            lookup.setdefault(alias, key)
+    return lookup
+
+
+def _lookup_employee_key(name: str, lookup: dict[str, str]) -> str:
+    for alias in _employee_alias_keys(name):
+        key = str(lookup.get(alias) or "").strip()
+        if key:
+            return key
+    return ""
+
+
 def format_csv_for_heartland(input_csv_path: str, key_file_path: str, output_path: str = "Cleaned_Heartland_Ready_Payroll.csv") -> Optional[str]:
     try:
         username = (key_file_path or "").strip().lower()
@@ -1929,10 +2121,10 @@ def format_csv_for_heartland(input_csv_path: str, key_file_path: str, output_pat
         keys_df = load_employee_keys_df(username)
         keys_df = _clean_keys_df(keys_df)
 
-        payroll_df["EmployeeKey"] = payroll_df["Employee"].astype(str).map(_emp_key)
-        keys_df["EmployeeKey"] = keys_df["Employee"].astype(str).map(_emp_key)
-
-        merged = payroll_df.merge(keys_df.drop(columns=["Employee"], errors="ignore"), on="EmployeeKey", how="left", indicator=True)
+        key_lookup = _employee_key_lookup(keys_df)
+        merged = payroll_df.copy()
+        merged["Key"] = merged["Employee"].astype(str).map(lambda n: _lookup_employee_key(n, key_lookup))
+        merged["_merge"] = merged["Key"].map(lambda k: "both" if str(k or "").strip() else "left_only")
 
         missing = merged[merged["_merge"] == "left_only"].copy()
         if not missing.empty:
@@ -1958,7 +2150,6 @@ def format_csv_for_heartland(input_csv_path: str, key_file_path: str, output_pat
         final_df["Key"] = final_df["Key"].fillna("").astype(str).str.strip()
         final_df["Key"] = final_df["Key"].mask(final_df["Key"].str.lower().isin(["nan", "none", "<na>"]), "")
         final_df = final_df[final_df["Key"].ne("")].copy()
-        final_df["Key"] = pd.to_numeric(final_df["Key"], errors="coerce").astype("Int64").astype(str)
         final_df = final_df[~final_df["Key"].str.lower().isin(["<na>", "nan", "none"])].copy()
 
         print("\n✅ Final Heartland Upload Table:")
@@ -2005,15 +2196,14 @@ def format_csv_for_heartland_geoff(input_csv_path: str, username: str, output_pa
 
     keys_df = load_employee_keys_df(uname)
     keys_df = _clean_keys_df(keys_df)
-    keys_df["Employee"] = keys_df["Employee"].astype(str).map(_canon_name)
-    key_map = dict(zip(keys_df["Employee"], keys_df["Key"].astype(str)))
+    key_lookup = _employee_key_lookup(keys_df)
 
-    out_cols = ["Key","Employee","Pay Rate","E_Floor_Hours","E_Closing_Hours","E_Breaks Paid_Hours","E_Admin_Hours","E_Overtime_Dollars","E_Bonus_Dollars","E_Commission_Dollars","E_Credit Tips_Dollars","E_Receptionists_Hours","LaborValue2"]
+    out_cols = ["Key","Employee","Pay Rate","E_Floor_Hours","E_Closing_Hours","E_Breaks Paid_Hours","E_Admin_Hours","E_Overtime_Dollars","E_Bonus_Dollars","E_Commission_Dollars","E_Credit Tips_Dollars","E_Receptionists_Hours","LaborValue2","E_Training_Hours"]
     out = pd.DataFrame(index=payroll_df.index, columns=out_cols)
 
     out["Employee"] = payroll_df["Employee"].astype(str)
     out["Pay Rate"] = payroll_df.get("Pay Rate", "0.00").astype(str).map(_fmt2)
-    out["Key"] = out["Employee"].map(lambda n: str(key_map.get(n, "")).strip())
+    out["Key"] = out["Employee"].map(lambda n: _lookup_employee_key(n, key_lookup))
 
     def _col_or_zero(colname: str):
         if colname in payroll_df.columns:
@@ -2024,11 +2214,14 @@ def format_csv_for_heartland_geoff(input_csv_path: str, username: str, output_pa
     out["E_Closing_Hours"] = _col_or_zero("CLOSING (Earn Hrs)")
 
     if "BREAKS PAID (Earn Hrs)" in payroll_df.columns:
-        out["E_Breaks Paid_Hours"] = _col_or_zero("BREAKS PAID (Earn Hrs)")
-    elif "TRAINING (Earn Hrs)" in payroll_df.columns:
-        out["E_Breaks Paid_Hours"] = _col_or_zero("TRAINING (Earn Hrs)")
+        breaks_paid = pd.to_numeric(payroll_df["BREAKS PAID (Earn Hrs)"], errors="coerce").fillna(0.0)
     else:
-        out["E_Breaks Paid_Hours"] = "0.00"
+        breaks_paid = pd.Series([0.0] * len(payroll_df), index=payroll_df.index)
+    if "TRAINING (Earn Hrs)" in payroll_df.columns:
+        training_hours = pd.to_numeric(payroll_df["TRAINING (Earn Hrs)"], errors="coerce").fillna(0.0)
+    else:
+        training_hours = pd.Series([0.0] * len(payroll_df), index=payroll_df.index)
+    out["E_Breaks Paid_Hours"] = (breaks_paid + training_hours).map(lambda x: f"{float(x):.2f}")
 
     out["E_Admin_Hours"] = _col_or_zero("ADMIN (Earn Hrs)")
     out["E_Overtime_Dollars"] = _col_or_zero("OVERTIME (Earn Hrs)")
@@ -2036,6 +2229,7 @@ def format_csv_for_heartland_geoff(input_csv_path: str, username: str, output_pa
     out["E_Commission_Dollars"] = _col_or_zero("COMMISSION (Earn $)")
     out["E_Credit Tips_Dollars"] = _col_or_zero("CREDIT TIPS (Earn $)")
     out["E_Receptionists_Hours"] = _col_or_zero("RECEPTIONISTS (Earn Hrs)")
+    out["E_Training_Hours"] = "0.00"
 
     dept_src = "Dept" if "Dept" in payroll_df.columns else ("Department" if "Department" in payroll_df.columns else None)
     out["LaborValue2"] = payroll_df[dept_src].astype(str).str.strip() if dept_src else ""
@@ -2051,12 +2245,11 @@ def format_csv_for_heartland_geoff(input_csv_path: str, username: str, output_pa
 
     out["Key"] = out["Key"].fillna("").astype(str).str.strip()
     out = out[~out["Key"].str.lower().isin(["", "nan", "none", "<na>"])].copy()
-    out["Key"] = pd.to_numeric(out["Key"], errors="coerce").astype("Int64").astype(str)
     out = out[~out["Key"].str.lower().isin(["<na>", "nan", "none"])].copy()
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(output_path, index=False)
-    print(f"Done → {output_path} | Rows: {len(out)}")
+    print(f"Done -> {output_path} | Rows: {len(out)}")
     print(out)
     return output_path
 
@@ -2082,7 +2275,7 @@ def format_csv_for_heartland_for_user(csv_path: str, username: str) -> Optional[
     )
 
 # ---------- Heartland upload ----------
-async def upload_to_heartland(page: Page, file_path: str, hl_user: str, hl_pass: str, username: str) -> None:
+async def upload_to_heartland(page: Page, file_path: str, hl_user: str, hl_pass: str, username: str, *, run_id: str | None = None) -> None:
     import re
 
     handyman = _get_handyman_agent()
@@ -2146,7 +2339,7 @@ async def upload_to_heartland(page: Page, file_path: str, hl_user: str, hl_pass:
                     return
             raise
 
-    await _heartland_login(page, hl_user, hl_pass, username)
+    await _heartland_login(page, hl_user, hl_pass, username, flow="payroll", run_id=run_id)
 
     await page.goto("https://www.heartlandpayroll.com/Payroll/PayrollTimeCardImport/NewTimeCardImport", wait_until="domcontentloaded")
     try:
@@ -2209,11 +2402,11 @@ async def upload_to_heartland(page: Page, file_path: str, hl_user: str, hl_pass:
 
 
 # ---------- Readiness check ----------
-def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_end_date=None) -> dict:
+def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_end_date=None, run_id: str | None = None) -> dict:
     try:
         _get_users_collection().update_one(
             {"username": (username or "").lower().strip()},
-            {"$set": {"payroll.cancel_requested": False}, "$unset": {"mfa_code": ""}},
+            {"$set": {"payroll.cancel_requested": False}, "$unset": {"mfa.code": "", "mfa.error": ""}},
             upsert=True,
         )
         sd_user, sd_pass = _get_vendor_creds(username, "salondata")
@@ -2236,17 +2429,21 @@ def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_en
         def _missing_from_keys() -> List[str]:
             payroll_df = load_clean_biweekly_table_for_user(csv_path, username)
             keys_df = load_employee_keys_df(username)
-            payroll_df["Employee"] = payroll_df["Employee"].fillna("").astype(str).map(_name_norm)
-            keys_df["Employee"] = keys_df["Employee"].fillna("").astype(str).map(_name_norm)
-            payroll_df = payroll_df[payroll_df["Employee"].astype(str).str.strip() != ""]
-            keys_df = keys_df[keys_df["Employee"].astype(str).str.strip() != ""]
-            merged = payroll_df.merge(keys_df, on="Employee", how="left", indicator=True)
-            key_series = merged.get("Key")
-            key_str = key_series.fillna("").astype(str).str.strip()
-            key_empty = key_str.eq("") | key_str.str.lower().isin(["nan","none"])
-            missing_mask = (merged["_merge"] == "left_only") | key_empty
-            missing_df = merged[missing_mask]
-            return sorted(missing_df["Employee"].dropna().unique().tolist())
+            key_lookup = _employee_key_lookup(keys_df)
+            names = (
+                payroll_df.get("Employee", pd.Series(dtype=str))
+                .fillna("")
+                .astype(str)
+                .map(_name_norm)
+            )
+            missing = []
+            for name in names:
+                name = str(name or "").strip()
+                if not name:
+                    continue
+                if not _lookup_employee_key(name, key_lookup):
+                    missing.append(name)
+            return sorted(set(missing))
 
         missing_names = _missing_from_keys()
 
@@ -2261,7 +2458,7 @@ def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_en
             print("check_payroll_ready_for_user (dry_run =", dry_run, ") →", result)
             return result
 
-        sync = refresh_employee_keys_from_heartland(username)
+        sync = refresh_employee_keys_from_heartland(username, run_id=run_id)
         if not sync.get("ok"):
             result = {"ready": False, "csv_path": csv_path, "missing_keys": missing_names, "error": sync.get("error") or "Heartland sync failed.", "needs_sync": True}
             print("check_payroll_ready_for_user (dry_run =", dry_run, ") →", result)
@@ -2285,7 +2482,7 @@ def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_en
 
 
 # ---------- Orchestration for Streamlit ----------
-async def _full_agentic_flow_inner(sd_user, sd_pass, hl_user, hl_pass, username, period_end_date=None, csv_path_prefetched=None) -> dict:
+async def _full_agentic_flow_inner(sd_user, sd_pass, hl_user, hl_pass, username, period_end_date=None, csv_path_prefetched=None, run_id: str | None = None) -> dict:
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False, slow_mo=50)
         context = await browser.new_context(accept_downloads=True)
@@ -2341,7 +2538,7 @@ async def _full_agentic_flow_inner(sd_user, sd_pass, hl_user, hl_pass, username,
         if not formatted:
             raise RuntimeError("Formatting returned None. Check console for formatting errors.")
 
-        await upload_to_heartland(page, formatted, hl_user, hl_pass, username)
+        await upload_to_heartland(page, formatted, hl_user, hl_pass, username, run_id=run_id)
 
         await browser.close()
         return {
@@ -2354,18 +2551,19 @@ async def _full_agentic_flow_inner(sd_user, sd_pass, hl_user, hl_pass, username,
         }
 
 
-def run_payroll_for_user(username: str, period_end_date=None) -> dict:
+def run_payroll_for_user(username: str, period_end_date=None, run_id: str | None = None) -> dict:
     try:
+        run_id = run_id or _new_run_id()
         _get_users_collection().update_one(
             {"username": (username or "").lower().strip()},
-            {"$set": {"payroll.cancel_requested": False}, "$unset": {"mfa_code": ""}},
+            {"$set": {"payroll.cancel_requested": False, "payroll.run_id": run_id}, "$unset": {"mfa.code": "", "mfa.error": ""}},
             upsert=True,
         )
-        _update_payroll_status(username, "running")
+        _update_payroll_status(username, "running", run_id=run_id)
         sd_user, sd_pass = _get_vendor_creds(username, "salondata")
         hl_user, hl_pass = _get_vendor_creds(username, "heartland")
 
-        ready = check_payroll_ready_for_user(username, dry_run=False, period_end_date=period_end_date)
+        ready = check_payroll_ready_for_user(username, dry_run=False, period_end_date=period_end_date, run_id=run_id)
         if not ready.get("ready"):
             raise RuntimeError(ready.get("error") or "Payroll is not ready. Missing employee keys.")
 
@@ -2376,16 +2574,17 @@ def run_payroll_for_user(username: str, period_end_date=None) -> dict:
             sd_user, sd_pass, hl_user, hl_pass, username,
             period_end_date=period_end_date,
             csv_path_prefetched=ready.get("csv_path"),
+            run_id=run_id,
         ))
         if isinstance(result, dict) and (result.get("error") or (result.get("ok") is False)):
             raise RuntimeError(result.get("error") or "Payroll failed.")
-        _update_payroll_status(username, "completed")
+        _update_payroll_status(username, "completed", run_id=run_id)
         return result
 
     except Exception as e:
         msg = str(e).strip() or f"{type(e).__name__} (no message). See console for traceback."
         friendly_msg = _friendly_error_message(msg)
-        _update_payroll_status(username, "failed", error=friendly_msg)
+        _update_payroll_status(username, "failed", error=friendly_msg, run_id=run_id if "run_id" in locals() else None)
         print("❌ run_payroll_for_user failed:", repr(e))
         traceback.print_exc()
         raise RuntimeError(friendly_msg) from e

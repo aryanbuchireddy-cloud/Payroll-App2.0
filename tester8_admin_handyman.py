@@ -3,6 +3,8 @@ import threading
 import time
 import hashlib
 import pandas as pd
+import uuid
+import html
 
 import streamlit as st
 from cryptography.fernet import Fernet
@@ -24,11 +26,24 @@ import subprocess, sys
 def ensure_chromium():
     if os.environ.get("PLAYWRIGHT_BROWSERS_INSTALLED") == "1":
         return
+    local_appdata = os.environ.get("LOCALAPPDATA", "")
+    if local_appdata:
+        ms_playwright = os.path.join(local_appdata, "ms-playwright")
+        try:
+            if os.path.isdir(ms_playwright):
+                for name in os.listdir(ms_playwright):
+                    candidate = os.path.join(ms_playwright, name, "chrome-win", "chrome.exe")
+                    if name.startswith("chromium-") and os.path.exists(candidate):
+                        os.environ["PLAYWRIGHT_BROWSERS_INSTALLED"] = "1"
+                        return
+        except Exception:
+            pass
     try:
         subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
         os.environ["PLAYWRIGHT_BROWSERS_INSTALLED"] = "1"
     except Exception as e:
-        raise RuntimeError(f"Playwright browser install failed at runtime: {e}")
+        os.environ["PLAYWRIGHT_BROWSER_INSTALL_ERROR"] = str(e)
+        print(f"Playwright browser install skipped/failed at startup: {e}")
 
 ensure_chromium()
 
@@ -76,6 +91,12 @@ def decrypt_str(token: str) -> str:
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Payroll Portal", page_icon="💈", layout="centered")
+
+if os.environ.get("PLAYWRIGHT_BROWSER_INSTALL_ERROR"):
+    st.warning(
+        "Playwright Chromium is not installed yet, so Heartland/SalonData automation may fail. "
+        "Run `.venv\\Scripts\\python.exe -m playwright install chromium` in the terminal, then restart the app."
+    )
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
@@ -129,8 +150,11 @@ ss.setdefault("readiness_thread_started", False)
 ss.setdefault("readiness_thread",        None)
 ss.setdefault("readiness_thread_user",   None)
 ss.setdefault("last_login_ts",           0)     # guards against component replaying last value
+ss.setdefault("portal_session_id",       uuid.uuid4().hex)
+ss.setdefault("readiness_run_id",        None)
+ss.setdefault("payroll_run_id",          None)
 
-DEFAULT_NOTIFY_MSG = ("info", "Click **Check Payroll Readiness** first, then **Execute Payroll**.", "")
+DEFAULT_NOTIFY_MSG = ("info", "Click Check Payroll Readiness first, then Execute Payroll.", "")
 
 
 def _reset_local_run_state() -> None:
@@ -141,6 +165,8 @@ def _reset_local_run_state() -> None:
     ss.readiness_thread_started = False
     ss.readiness_thread = None
     ss.readiness_thread_user = None
+    ss.readiness_run_id = None
+    ss.payroll_run_id = None
     ss.mfa_active = False
     ss.mfa_submitted = False
     ss.mfa_thank_you = False
@@ -166,7 +192,7 @@ def _reset_user_backend_state(users_col, username: str | None) -> None:
                 "payroll.updated_at": _now(),
             },
             "$unset": {
-                "mfa_code": "",
+                "mfa": "",
                 "readiness_status": "",
             },
         },
@@ -241,6 +267,11 @@ def _friendly_error(err: str | None) -> str:
     first_line = msg.splitlines()[0].strip()
     low        = msg.lower()
 
+    if "winerror 5" in low or "access is denied" in low or "permissionerror" in low:
+        return (
+            "Windows blocked access to a local browser or payroll file. "
+            "Close extra Streamlit/Python windows and try again. If it keeps happening, restart the app."
+        )
     if "traceback" in low or "file \"" in low or "playwright" in low or "locator" in low:
         if "salondata" in low:
             return "SalonData could not complete the request. Check the SalonData password and try again."
@@ -465,16 +496,18 @@ def _update_integration_password(col, username: str, provider: str, new_password
 
 
 # ── Readiness state ───────────────────────────────────────────────────────────
-def _set_readiness_status(users_col, username: str, state: str, *, error=None, missing_keys=None, csv_path=None, needs_sync=None):
+def _set_readiness_status(users_col, username: str, state: str, *, error=None, missing_keys=None, csv_path=None, needs_sync=None, run_id=None):
     users_col.update_one(
         {"username": _norm_username(username)},
         {"$set": {"readiness_status": {
             "state":        state,
+            "run_id":       run_id,
+            "session_id":   ss.get("portal_session_id"),
             "error":        error,
             "missing_keys": missing_keys or [],
             "csv_path":     csv_path,
             "needs_sync":   needs_sync,
-            "ts":           _now(),
+            "updated_at":   _now(),
         }}},
     )
 
@@ -485,49 +518,54 @@ def _clear_readiness_state(users_col=None, username: str | None = None):
     if users_col is not None and username:
         users_col.update_one({"username": _norm_username(username)}, {"$unset": {"readiness_status": ""}})
 
-def _start_readiness_thread(users_col, username: str, period_end_date):
+def _start_readiness_thread(users_col, username: str, period_end_date, run_id: str):
     """
     Phase 1: dry_run=True (fast, no browser)
     Phase 2: if keys missing → dry_run=False (Heartland sync, waits for MFA in Mongo)
     """
-    users_col.update_one({"username": _norm_username(username)}, {"$unset": {"mfa_code": ""}})
+    users_col.update_one({"username": _norm_username(username)}, {"$unset": {"mfa": ""}})
 
     def _worker():
         try:
-            _set_readiness_status(users_col, username, "running")
+            _set_readiness_status(users_col, username, "running", run_id=run_id)
 
-            pre = check_payroll_ready_for_user(username, dry_run=True, period_end_date=period_end_date)
+            pre = check_payroll_ready_for_user(username, dry_run=True, period_end_date=period_end_date, run_id=run_id)
 
             if pre.get("ready") and not (pre.get("missing_keys") or []):
                 _set_readiness_status(users_col, username, "ready",
+                                      run_id=run_id,
                                       csv_path=pre.get("csv_path"), needs_sync=False)
                 return
 
             missing = pre.get("missing_keys") or []
             _set_readiness_status(users_col, username, "syncing_keys",
+                                  run_id=run_id,
                                   missing_keys=missing, csv_path=pre.get("csv_path"), needs_sync=True)
 
-            users_col.update_one({"username": _norm_username(username)}, {"$unset": {"mfa_code": ""}})
+            users_col.update_one({"username": _norm_username(username)}, {"$unset": {"mfa": ""}})
 
-            full = check_payroll_ready_for_user(username, dry_run=False, period_end_date=period_end_date)
+            full = check_payroll_ready_for_user(username, dry_run=False, period_end_date=period_end_date, run_id=run_id)
 
             if full.get("ready") and not (full.get("missing_keys") or []):
                 _set_readiness_status(users_col, username, "ready",
+                                      run_id=run_id,
                                       csv_path=full.get("csv_path"), needs_sync=bool(full.get("needs_sync")))
                 return
 
             missing2 = full.get("missing_keys") or []
             _set_readiness_status(users_col, username, "not_ready",
+                                  run_id=run_id,
                                   error=_friendly_error(full.get("error") or "Payroll is not ready."),
                                   missing_keys=missing2, csv_path=full.get("csv_path"), needs_sync=True)
 
         except Exception as e:
-            _set_readiness_status(users_col, username, "failed", error=_friendly_error(str(e)))
+            _set_readiness_status(users_col, username, "failed", error=_friendly_error(str(e)), run_id=run_id)
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
     ss.readiness_thread         = t
     ss.readiness_thread_user    = _norm_username(username)
+    ss.readiness_run_id         = run_id
     ss.readiness_thread_started = True
 
 
@@ -1055,13 +1093,48 @@ if ss.onboarding_mode or not user_rec.get("profile_completed") or needs_setup:
 # ═════════════════════════════════════════════════════════════════════════════
 user_rec = _mongo_get_user(users, ss.auth_user) or {}
 
-st.success(f"Welcome back, **{ss.auth_user}**! 🎉")
-st.caption(
-    f"SalonData: {'✅ connected' if _has_integration_creds(user_rec, 'salondata') else '❌ not connected'}  "
-    f"·  Heartland: {'✅ connected' if _has_integration_creds(user_rec, 'heartland') else '❌ not connected'}"
+st.markdown(
+    """
+    <style>
+      .payroll-shell{border:1px solid rgba(128,132,149,.22);border-radius:8px;padding:16px 18px;margin:0 0 16px;background:rgba(128,132,149,.055)}
+      .payroll-topline{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}
+      .payroll-title{font-size:1.35rem;font-weight:720;line-height:1.2}
+      .payroll-subtle{color:rgba(128,132,149,.96);font-size:.92rem;margin-top:4px}
+      .payroll-badges{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+      .payroll-badge{border:1px solid rgba(128,132,149,.25);border-radius:999px;padding:5px 9px;font-size:.82rem;font-weight:650;white-space:nowrap}
+      .payroll-badge.ok{color:#0f7a3d;background:rgba(16,185,129,.12)}
+      .payroll-badge.bad{color:#b42318;background:rgba(244,63,94,.12)}
+      .status-card{border:1px solid rgba(128,132,149,.24);border-left-width:5px;border-radius:8px;padding:14px 16px;margin:10px 0 14px;background:rgba(128,132,149,.06)}
+      .status-card.info{border-left-color:#2563eb}.status-card.success{border-left-color:#16a34a}.status-card.warning{border-left-color:#d97706}.status-card.error{border-left-color:#dc2626}
+      .status-title{font-size:1.02rem;font-weight:720}.status-caption{color:rgba(128,132,149,.98);font-size:.9rem;margin-top:6px}
+      .step-kicker{color:rgba(128,132,149,.95);font-size:.72rem;font-weight:760;text-transform:uppercase}
+      .step-label{font-size:.9rem;font-weight:680;margin-top:2px}
+      .mfa-helper{border:1px solid rgba(128,132,149,.22);border-radius:8px;padding:12px 14px;margin-bottom:10px;background:rgba(128,132,149,.045)}
+      @media(max-width:760px){.payroll-badges{justify-content:flex-start}}
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
-st.divider()
+_sd_ok = _has_integration_creds(user_rec, "salondata")
+_hl_ok = _has_integration_creds(user_rec, "heartland")
+st.markdown(
+    f"""
+    <div class="payroll-shell">
+      <div class="payroll-topline">
+        <div>
+          <div class="payroll-title">Payroll Portal</div>
+          <div class="payroll-subtle">Signed in as {html.escape(str(ss.auth_user))}</div>
+        </div>
+        <div class="payroll-badges">
+          <span class="payroll-badge {'ok' if _sd_ok else 'bad'}">SalonData {'connected' if _sd_ok else 'missing'}</span>
+          <span class="payroll-badge {'ok' if _hl_ok else 'bad'}">Heartland {'connected' if _hl_ok else 'missing'}</span>
+        </div>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ── Extra session state flags ─────────────────────────────────────────────────
 # mfa_active:      True only while payroll is actively running (enables MFA section)
@@ -1078,6 +1151,7 @@ ss.pop("notify_msg", None)
 #  1 ▸ PERIOD END DATE
 # ═════════════════════════════════════════════════════════════════════════════
 st.subheader("📅 Period End Date")
+st.caption("Pick the payroll Friday before checking readiness or running payroll.")
 
 default_friday        = _default_payroll_friday(date.today())
 selected_payroll_date = st.date_input(
@@ -1102,12 +1176,16 @@ r_state          = str(readiness_status.get("state") or "").strip().lower()
 r_missing        = readiness_status.get("missing_keys") or []
 r_error          = readiness_status.get("error")
 r_csv            = readiness_status.get("csv_path")
-r_updated        = float(readiness_status.get("updated_at") or 0)
+r_updated        = float(readiness_status.get("updated_at") or readiness_status.get("ts") or 0)
 
 payroll_doc = latest_user.get("payroll") or {}
 p_state     = str(payroll_doc.get("state") or "").strip().lower()
 p_err       = payroll_doc.get("error")
 p_updated   = float(payroll_doc.get("updated_at") or 0)
+mfa_doc     = latest_user.get("mfa") if isinstance(latest_user.get("mfa"), dict) else {}
+mfa_status  = str(mfa_doc.get("status") or "").strip().lower()
+mfa_flow    = str(mfa_doc.get("flow") or "").strip().lower()
+mfa_error   = mfa_doc.get("error")
 
 readiness_thread = ss.get("readiness_thread", None)
 payroll_thread   = ss.get("payroll_thread",   None)
@@ -1117,10 +1195,10 @@ payroll_thread_owned = ss.get("payroll_thread_user") == current_user
 readiness_thread_alive = bool(readiness_thread_owned and readiness_thread and readiness_thread.is_alive())
 payroll_thread_alive = bool(payroll_thread_owned and payroll_thread and payroll_thread.is_alive())
 readiness_running = readiness_thread_alive or r_state in ("running", "syncing_keys")
-payroll_running = payroll_thread_alive or p_state in ("running", "awaiting_mfa")
+payroll_running = payroll_thread_alive or p_state in ("running", "awaiting_mfa", "mfa_submitted", "mfa_accepted", "post_mfa_running")
 now_ts = _now()
 readiness_stale = r_state in ("running", "syncing_keys") and r_updated and (now_ts - r_updated > 900)
-payroll_stale = p_state in ("running", "awaiting_mfa") and p_updated and (now_ts - p_updated > 900)
+payroll_stale = p_state in ("running", "awaiting_mfa", "mfa_submitted", "mfa_accepted", "post_mfa_running") and p_updated and (now_ts - p_updated > 900)
 
 # ── Auto-clear stale "running" readiness when no live thread owns it ──────────
 if False and r_state in ("running", "syncing_keys") and not readiness_running:
@@ -1162,15 +1240,17 @@ if ss.payroll_thread_started and payroll_thread_owned and not payroll_thread_ali
 #  2 ▸ ACTIONS — Check Readiness | Execute Payroll
 # ═════════════════════════════════════════════════════════════════════════════
 st.subheader("▶️ Actions")
+st.caption("Start with readiness. Execute Payroll unlocks only after the latest readiness check passes.")
 
 # Button disable rules:
 #   Check Readiness  → disabled only while readiness check is actively running
 #   Execute Payroll  → disabled if: not ready, payroll running, OR already done this session
 is_ready        = (r_state == "ready")
-check_disabled  = (readiness_thread_alive or not is_valid_friday)
+check_disabled  = (readiness_running or payroll_running or not is_valid_friday)
 run_disabled    = (
     not is_ready
-    or payroll_thread_alive
+    or payroll_running
+    or readiness_running
     or ss.payroll_done
     or not is_valid_friday
 )
@@ -1200,16 +1280,39 @@ def _notify(kind: str, msg: str, caption: str = ""):
 def _render_notify():
     _nm = _current_notify
     kind, msg, caption = _nm
-    if kind == "info":
-        st.info(msg)
-    elif kind == "success":
-        st.success(msg)
-    elif kind == "warning":
-        st.warning(msg)
-    elif kind == "error":
-        st.error(msg)
-    if caption:
-        st.caption(caption)
+    safe_kind = kind if kind in {"info", "success", "warning", "error"} else "info"
+    safe_msg = html.escape(str(msg or ""))
+    safe_caption = html.escape(str(caption or ""))
+    caption_html = f'<div class="status-caption">{safe_caption}</div>' if safe_caption else ""
+    st.markdown(
+        f"""
+        <div class="status-card {safe_kind}">
+          <div class="status-title">{safe_msg}</div>
+          {caption_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_workflow_steps():
+    steps = [
+        ("Readiness", r_state in ("running", "syncing_keys"), r_state in ("ready", "not_ready") or bool(r_csv)),
+        ("Heartland MFA", mfa_status in ("awaiting_mfa", "submitted", "accepted"), mfa_status in ("accepted", "post_mfa_running") or _rs_sub in ("mfa_accepted", "post_mfa_running")),
+        ("Heartland setup", mfa_status == "post_mfa_running" or _rs_sub == "post_mfa_running", p_state in ("running", "completed") or r_state in ("ready", "not_ready")),
+        ("Payroll upload", payroll_running and p_state not in ("awaiting_mfa", "mfa_submitted", "mfa_accepted"), p_state == "completed"),
+        ("PDF ready", False, bool(user_rec.get("last_pdf") or user_rec.get("pdf_history"))),
+    ]
+    cols = st.columns(5)
+    for idx, (col, (label, active, done)) in enumerate(zip(cols, steps), start=1):
+        with col:
+            if active:
+                st.info(f"Step {idx}\n\n{label}")
+            elif done:
+                st.success(f"Step {idx}\n\n{label}")
+            else:
+                st.caption(f"Step {idx}")
+                st.write(label)
 
 # ── Handle Check Readiness click ──────────────────────────────────────────────
 if check_clicked:
@@ -1219,8 +1322,10 @@ if check_clicked:
     ss.mfa_thank_you = False
     _reset_user_backend_state(users, ss.auth_user)
     _clear_readiness_state(users, ss.auth_user)
-    users.update_one({"username": ss.auth_user}, {"$unset": {"mfa_code": ""}})
-    _start_readiness_thread(users, ss.auth_user, selected_payroll_date)
+    run_id = uuid.uuid4().hex
+    ss.readiness_run_id = run_id
+    users.update_one({"username": ss.auth_user}, {"$unset": {"mfa": ""}})
+    _start_readiness_thread(users, ss.auth_user, selected_payroll_date, run_id)
     r_state = "running"
     readiness_running = True
     # Do NOT block or loop here — let the auto-refresh below pick up state changes
@@ -1228,11 +1333,15 @@ if check_clicked:
 # ── Handle Execute Payroll click ──────────────────────────────────────────────
 if run_clicked:
     _reset_user_backend_state(users, ss.auth_user)
-    users.update_one({"username": ss.auth_user}, {"$unset": {"mfa_code": ""}})
+    run_id = uuid.uuid4().hex
+    ss.payroll_run_id = run_id
+    users.update_one({"username": ss.auth_user}, {"$unset": {"mfa": ""}})
     users.update_one(
         {"username": ss.auth_user},
         {"$set": {
             "payroll.state": "running",
+            "payroll.run_id": run_id,
+            "payroll.session_id": ss.portal_session_id,
             "payroll.error": None,
             "payroll.cancel_requested": False,
             "payroll.updated_at": _now(),
@@ -1242,13 +1351,13 @@ if run_clicked:
     ss.mfa_active    = True
     ss.mfa_submitted = False
 
-    def _payroll_worker(username: str, _period: date):
+    def _payroll_worker(username: str, _period: date, _run_id: str):
         try:
-            run_payroll_for_user(username, period_end_date=_period)
+            run_payroll_for_user(username, period_end_date=_period, run_id=_run_id)
         except Exception as e:
             print("Background payroll error:", repr(e))
 
-    t = threading.Thread(target=_payroll_worker, args=(ss.auth_user, selected_payroll_date), daemon=True)
+    t = threading.Thread(target=_payroll_worker, args=(ss.auth_user, selected_payroll_date, run_id), daemon=True)
     t.start()
     ss.payroll_thread         = t
     ss.payroll_thread_user    = _norm_username(ss.auth_user)
@@ -1273,13 +1382,23 @@ _rs_sub  = str(_rlatest.get("substate") or "").strip().lower()   # "awaiting_mfa
 if payroll_stale:
     _notify("error", "❌ Payroll timed out. Start a fresh run or sign out and back in.")
 elif readiness_stale:
-    _notify("error", "❌ Readiness check timed out. Click **Check Payroll Readiness** to start fresh.")
+    _notify("error", "❌ Readiness check timed out. Click Check Payroll Readiness to start fresh.")
 elif _ps == "failed" or (_pe and _ps != "completed"):
     _notify("error", f"❌ Payroll failed: {_friendly_error(_pe)}")
 elif r_state == "failed":
     _notify("error", f"❌ {_friendly_error(r_error) or 'Readiness check failed.'}")
+elif mfa_status == "rejected":
+    _notify("error", f"❌ {_friendly_error(mfa_error) or 'Heartland rejected that code. Request a fresh code and try again.'}")
+elif mfa_status == "submitted":
+    _notify("info", "🔐 MFA submitted. Waiting for Heartland to verify it.")
+elif mfa_status == "accepted":
+    _notify("success", "✅ MFA accepted. Loading Heartland account.")
+elif mfa_status == "post_mfa_running":
+    _notify("info", "⚙️ Heartland opened. Finishing payroll setup.")
+elif mfa_status == "awaiting_mfa":
+    _notify("warning", "🔐 Enter your Heartland MFA code.")
 elif _ps == "awaiting_mfa":
-    _notify("warning", "🔐 Please enter your MFA code now")
+    _notify("warning", "🔐 Enter your Heartland MFA code.")
 elif payroll_running or _ps == "running":
     if ss.mfa_thank_you:
         # Flash "Thank you" for exactly one render cycle, then transition to finishing
@@ -1312,7 +1431,7 @@ elif r_state == "syncing_keys":
         _notify("info", "⚙️ Finishing sync — importing keys from Heartland…",
                 caption=names_caption)
     elif _rs_sub == "awaiting_mfa":
-        _notify("warning", "🔐 Please enter your MFA code now",
+        _notify("warning", "🔐 Enter your Heartland MFA code.",
                 caption=names_caption)
     else:
         _notify(
@@ -1329,9 +1448,10 @@ elif r_state == "not_ready":
     _notify("error", f"❌ {_friendly_error(r_error) or 'Payroll is not ready.'}",
             caption=("Missing keys: " + ", ".join(r_missing)) if r_missing else "")
 else:
-    _notify("info", "Click **Check Payroll Readiness** first, then **Execute Payroll**.")
+    _notify("info", "Click Check Payroll Readiness first, then Execute Payroll.")
 
 _render_notify()
+_render_workflow_steps()
 
 st.divider()
 
@@ -1424,8 +1544,35 @@ st.divider()
 # ═════════════════════════════════════════════════════════════════════════════
 st.subheader("🔐 Heartland MFA")
 
-mfa_input_disabled  = not (ss.mfa_active or (r_state == "syncing_keys" and readiness_running))
-mfa_submit_disabled = not (ss.mfa_active or (r_state == "syncing_keys" and readiness_running)) or ss.mfa_submitted
+active_mfa_prompt = (
+    mfa_status in ("awaiting_mfa", "rejected")
+    and (
+        _ps == "awaiting_mfa"
+        or _rs_sub == "awaiting_mfa"
+        or mfa_flow in ("payroll", "readiness")
+    )
+)
+mfa_locked = mfa_status in ("submitted", "accepted", "post_mfa_running")
+mfa_input_disabled  = not active_mfa_prompt or mfa_locked
+mfa_submit_disabled = not active_mfa_prompt or mfa_locked
+
+if mfa_status == "submitted":
+    _mfa_helper_text = "Code submitted. The button is locked so the same code is not sent twice."
+elif mfa_status == "accepted":
+    _mfa_helper_text = "Heartland accepted the code. Loading the account now."
+elif mfa_status == "post_mfa_running":
+    _mfa_helper_text = "Heartland is open. The app is finishing the next payroll step."
+elif mfa_status == "rejected":
+    _mfa_helper_text = "Heartland rejected that code. Request a fresh code, enter it here, and submit once."
+elif active_mfa_prompt:
+    _mfa_helper_text = "Enter the 6-digit Heartland code once. After submit, this panel will lock and show progress."
+else:
+    _mfa_helper_text = "No Heartland code is needed right now."
+
+st.markdown(
+    f'<div class="mfa-helper">{html.escape(_mfa_helper_text)}</div>',
+    unsafe_allow_html=True,
+)
 
 mfa_col1, mfa_col2 = st.columns([3, 1])
 with mfa_col1:
@@ -1436,13 +1583,24 @@ with mfa_col1:
     )
 with mfa_col2:
     if st.button(
-        "Submit MFA",
+        "Submitted" if mfa_locked else "Submit MFA",
         use_container_width=True,
         key="btn_submit_mfa",
         disabled=mfa_submit_disabled,
     ):
         if mfa_code_input.strip():
-            users.update_one({"username": ss.auth_user}, {"$set": {"mfa_code": mfa_code_input.strip()}})
+            active_run_id = mfa_doc.get("run_id") or ss.payroll_run_id or ss.readiness_run_id
+            users.update_one(
+                {"username": ss.auth_user},
+                {"$set": {
+                    "mfa.flow": mfa_flow or ("readiness" if r_state == "syncing_keys" else "payroll"),
+                    "mfa.run_id": active_run_id,
+                    "mfa.status": "submitted",
+                    "mfa.code": mfa_code_input.strip(),
+                    "mfa.submitted_at": _now(),
+                    "mfa.updated_at": _now(),
+                }},
+            )
             ss.mfa_submitted = True
             ss.mfa_thank_you = True
             st.rerun()
@@ -1500,7 +1658,7 @@ with st.expander("🔑 Update passwords", expanded=False):
             else:
                 if _update_integration_password(users, ss.auth_user, "salondata", sd_pw1):
                     _clear_readiness_state(users, ss.auth_user)
-                    users.update_one({"username": ss.auth_user}, {"$unset": {"mfa_code": ""}})
+                    users.update_one({"username": ss.auth_user}, {"$unset": {"mfa": ""}})
                     st.success("✅ SalonData password updated.")
                 else:
                     st.error("Update failed — SalonData must be configured first.")
@@ -1517,7 +1675,7 @@ with st.expander("🔑 Update passwords", expanded=False):
             else:
                 if _update_integration_password(users, ss.auth_user, "heartland", hl_pw1):
                     _clear_readiness_state(users, ss.auth_user)
-                    users.update_one({"username": ss.auth_user}, {"$unset": {"mfa_code": ""}})
+                    users.update_one({"username": ss.auth_user}, {"$unset": {"mfa": ""}})
                     st.success("✅ Heartland password updated.")
                 else:
                     st.error("Update failed — Heartland must be configured first.")

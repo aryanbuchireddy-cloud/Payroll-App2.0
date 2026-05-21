@@ -35,3 +35,7 @@ heartland_employee_ids.xlsx
 Cleaned_Heartland_Ready_Payroll.csv
 *.trace.zip
 playwright-trace.zip
+
+# Local test scratch
+.pytest-tmp/
+.pytest-work/
