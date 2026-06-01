@@ -1665,7 +1665,7 @@ def refresh_employee_keys_from_heartland(username: str, run_id: str | None = Non
         async def _inner():
             async with async_playwright() as p:
                 _sys_chromium = __import__('shutil').which('chromium') or __import__('shutil').which('chromium-browser')
-                browser = await p.chromium.launch(headless=False, slow_mo=50, **({'executable_path': _sys_chromium} if _sys_chromium else {}))
+                browser = await p.chromium.launch(headless=True, slow_mo=50, **({'executable_path': _sys_chromium} if _sys_chromium else {}))
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
                 excel_path = await _download_employee_excel_from_heartland(page, hl_user, hl_pass, username, run_id=run_id)
@@ -2416,7 +2416,7 @@ def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_en
 
         async def _inner_salondata():
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=False, slow_mo=50)
+                browser = await p.chromium.launch(headless=True, slow_mo=50)
                 context = await browser.new_context(accept_downloads=True)
                 page = await context.new_page()
                 run_ctx = make_user_run_context(username)
@@ -2484,7 +2484,7 @@ def check_payroll_ready_for_user(username: str, dry_run: bool = False, period_en
 # ---------- Orchestration for Streamlit ----------
 async def _full_agentic_flow_inner(sd_user, sd_pass, hl_user, hl_pass, username, period_end_date=None, csv_path_prefetched=None, run_id: str | None = None) -> dict:
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, slow_mo=50)
+        browser = await p.chromium.launch(headless=True, slow_mo=50)
         context = await browser.new_context(accept_downloads=True)
         page = await context.new_page()
         run_ctx = make_user_run_context(username)
