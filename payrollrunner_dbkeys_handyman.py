@@ -2288,6 +2288,7 @@ def _resolve_output_path(output_path: str, input_csv_path: str | None = None) ->
 
     return os.path.join(tempfile.gettempdir(), os.path.basename(output_path))
 
+
 import re
 
 def _safe_text(value) -> str:
@@ -2410,7 +2411,7 @@ def format_csv_for_heartland(input_csv_path: str, key_file_path: str, output_pat
         output_path = _resolve_output_path(output_path, input_csv_path)
         try:
             final_df.to_csv(output_path, index=False)
-        except (PermissionError, OSError) as e:
+        except (PermissionError, OSError):
             fallback_path = os.path.join(tempfile.gettempdir(), os.path.basename(output_path))
             print(f"\n⚠️ Permission denied writing {output_path}. Falling back to temp path: {fallback_path}")
             try:
@@ -2516,7 +2517,7 @@ def format_csv_for_heartland_geoff(input_csv_path: str, username: str, output_pa
     output_path = _resolve_output_path(output_path, input_csv_path)
     try:
         out.to_csv(output_path, index=False)
-    except (PermissionError, OSError) as e:
+    except (PermissionError, OSError):
         fallback_path = os.path.join(tempfile.gettempdir(), os.path.basename(output_path))
         print(f"\n⚠️ Permission denied writing {output_path}. Falling back to temp path: {fallback_path}")
         out.to_csv(fallback_path, index=False)
@@ -2533,7 +2534,6 @@ def format_csv_for_heartland_for_user(csv_path: str, username: str) -> Optional[
     """
     uname = (username or "").lower().strip()
     profile = (get_runner_parser_profile(uname) or "standard").lower().strip()
-
     default_output = os.path.join(os.path.dirname(os.path.abspath(csv_path)), "Cleaned_Heartland_Ready_Payroll.csv")
 
     if profile == "geoff":
