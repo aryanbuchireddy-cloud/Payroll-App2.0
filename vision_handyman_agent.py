@@ -24,7 +24,7 @@ import time
 from typing import Any, Dict, Optional
 
 import PIL.Image
-import google.generativeai as genai
+from google import genai
 
 try:
     import streamlit as st
@@ -49,18 +49,17 @@ GEMINI_API_KEY = _get_secret_or_env("GEMINI_API_KEY", "")
 GEMINI_MODEL = _get_secret_or_env("GEMINI_MODEL", "gemini-2.0-flash").strip() or "gemini-2.0-flash"
 
 
-def _get_model() -> genai.GenerativeModel:
+def _get_client() -> genai.Client:
     if not GEMINI_API_KEY:
         raise RuntimeError(
             "GEMINI_API_KEY is not set. Add it to Streamlit secrets or set it as an environment variable."
         )
-    genai.configure(api_key=GEMINI_API_KEY)
-    return genai.GenerativeModel(GEMINI_MODEL)
+    return genai.Client(api_key=GEMINI_API_KEY)
 
 
 class BrowserHandymanAgent:
     def __init__(self) -> None:
-        self._model = _get_model()
+        self._client = _get_client()
 
     async def ask(self, page, task: str) -> Dict[str, Any]:
         raw_png = await page.screenshot(full_page=False)
@@ -93,7 +92,10 @@ class BrowserHandymanAgent:
         )
 
         try:
-            response = self._model.generate_content([prompt, img])
+            response = self._client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=[prompt, img],
+            )
             text = getattr(response, "text", "") or ""
             text = text.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
             data = json.loads(text)
