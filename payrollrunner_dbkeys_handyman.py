@@ -2130,26 +2130,112 @@ def _prepare_geoff_pdf_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns=[training_col])
 
 
-def build_combined_pdf_geoff(input_csv_path: str, keys_csv_path: str, output_pdf_path: str) -> str:
-    df = load_clean_biweekly_table_geoff(input_csv_path).copy()
-    if df.empty:
-        return build_combined_pdf(input_csv_path, keys_csv_path, output_pdf_path)
+def _parse_geoff_salon_summary_totals(input_csv_path: str) -> pd.DataFrame:
+    with open(input_csv_path, encoding="utf-8", errors="replace") as f:
+        rows = list(csv.reader(f))
 
+    summaries = []
+    salon_name = ""
+    dept = ""
+    i = 0
+    while i < len(rows):
+        row = rows[i]
+        if row and len(row) >= 2 and str(row[0]).strip().startswith("Payroll Detail Report - Biweekly"):
+            salon_field = str(row[1]).strip()
+            match = _DEPT_HASH_RE.search(salon_field)
+            dept = match.group(1).strip() if match else ""
+            salon_name = salon_field.split("#", 1)[0].strip().strip('"')
+
+        if row and str(row[0]).strip().upper() == "SALON TOTALS":
+            summary = {"SalonName": salon_name, "Dept": dept, "OT Dollars": 0.0, "TOTAL Hours": 0.0, "Pay": 0.0}
+            j = i + 1
+            while j < len(rows):
+                total_row = rows[j]
+                if not total_row or not any(str(cell).strip() for cell in total_row):
+                    break
+                joined = ",".join(map(str, total_row)).lower()
+                if "position:" in joined or str(total_row[0]).strip().lower() in ("payroll %", "performance summary"):
+                    break
+
+                def _number_at(index: int) -> float:
+                    value = total_row[index] if index < len(total_row) else ""
+                    text = str(value).replace(",", "").replace("$", "").strip()
+                    try:
+                        return float(text)
+                    except ValueError:
+                        return 0.0
+
+                label = str(total_row[0] if total_row else "").replace("*", "").strip().lower()
+                if label.startswith("totals"):
+                    summary["TOTAL Hours"] = _number_at(1)
+                    summary["Pay"] = _number_at(3)
+                    break
+                if label.startswith(("ot hrs", "overtime hrs", "overtime")):
+                    summary["OT Dollars"] = _number_at(3)
+                j += 1
+            summaries.append(summary)
+            i = j
+        i += 1
+
+    return pd.DataFrame(summaries, columns=["SalonName", "Dept", "OT Dollars", "TOTAL Hours", "Pay"])
+
+
+def _build_geoff_pdf_report_frames(
+    df: pd.DataFrame,
+    salon_totals: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str], list[str]]:
     df = _prepare_geoff_pdf_dataframe(df)
     df["Dept"] = df.get("Dept", "").astype(str).str.replace(".0", "", regex=False).str.strip()
 
-    hours_cols = [c for c in ["FLOOR (Earn Hrs)","CLOSING (Earn Hrs)","BREAKS PAID (Earn Hrs)","ADMIN (Earn Hrs)","RECEPTIONISTS (Earn Hrs)","OVERTIME (Earn Hrs)"] if c in df.columns]
+    hour_base_cols = [c for c in ["FLOOR (Earn Hrs)","ADMIN (Earn Hrs)","CLOSING (Earn Hrs)","RECEPTIONISTS (Earn Hrs)","BREAKS PAID (Earn Hrs)"] if c in df.columns]
+    overtime_col = "OVERTIME (Earn Hrs)"
     money_cols = [c for c in ["BONUS (Earn $)","COMMISSION (Earn $)","CREDIT TIPS (Earn $)"] if c in df.columns]
 
-    for c in hours_cols + money_cols:
+    for c in hour_base_cols + money_cols + [overtime_col]:
+        if c not in df.columns:
+            df[c] = 0.0
         df[c] = pd.to_numeric(df.get(c, 0), errors="coerce").fillna(0.0)
 
-    hours_agg = df.groupby(["Dept"], dropna=False)[hours_cols].sum().reset_index() if hours_cols else pd.DataFrame(columns=["Dept"])
-    hours_agg.insert(0, "SalonName", "")
-    if hours_cols and not hours_agg.empty:
-        hours_tot = {"SalonName": "ALL SALONS", "Dept": ""}
-        for c in hours_cols: hours_tot[c] = float(hours_agg[c].sum())
-        hours_agg = pd.concat([hours_agg, pd.DataFrame([hours_tot])], ignore_index=True)
+    hours_agg = df.groupby(["Dept"], dropna=False)[hour_base_cols].sum().reset_index() if hour_base_cols else pd.DataFrame(columns=["Dept"])
+    fallback = df.groupby(["Dept"], dropna=False).agg(
+        **{
+            "OT Dollars": (overtime_col, "sum"),
+            "TOTAL Hours": (hour_base_cols[0], "size"),
+        }
+    ).reset_index()
+    fallback["TOTAL Hours"] = df.groupby(["Dept"], dropna=False)[hour_base_cols].sum().sum(axis=1).values if hour_base_cols else 0.0
+    fallback["Pay"] = 0.0
+
+    totals = salon_totals.copy() if salon_totals is not None else pd.DataFrame()
+    if totals.empty:
+        totals = fallback
+        totals.insert(0, "SalonName", "")
+    else:
+        totals["Dept"] = totals.get("Dept", "").astype(str).str.replace(".0", "", regex=False).str.strip()
+        totals = totals.merge(fallback, on="Dept", how="outer", suffixes=("", "_fallback"))
+        for col in ["OT Dollars", "TOTAL Hours", "Pay"]:
+            totals[col] = pd.to_numeric(totals.get(col, 0), errors="coerce").fillna(
+                pd.to_numeric(totals.get(f"{col}_fallback", 0), errors="coerce").fillna(0.0)
+            )
+        totals = totals.drop(columns=[c for c in totals.columns if c.endswith("_fallback")], errors="ignore")
+
+    hours_agg = totals[["SalonName", "Dept", "OT Dollars", "TOTAL Hours", "Pay"]].merge(hours_agg, on="Dept", how="outer")
+    display_names = {
+        "FLOOR (Earn Hrs)": "Floor Hrs",
+        "CLOSING (Earn Hrs)": "Closing Hrs",
+        "BREAKS PAID (Earn Hrs)": "Breaks Paid Hrs",
+        "ADMIN (Earn Hrs)": "Admin Hrs",
+        "RECEPTIONISTS (Earn Hrs)": "Receptionist Hrs",
+    }
+    hours_agg = hours_agg.rename(columns=display_names)
+    hours_cols = [display_names[c] for c in hour_base_cols] + ["OT Dollars", "TOTAL Hours", "Pay"]
+    hours_agg = hours_agg[["SalonName", "Dept"] + hours_cols]
+    for c in hours_cols:
+        hours_agg[c] = pd.to_numeric(hours_agg.get(c, 0), errors="coerce").fillna(0.0)
+    hours_tot = {"SalonName": "ALL SALONS", "Dept": ""}
+    for c in hours_cols:
+        hours_tot[c] = float(hours_agg[c].sum())
+    hours_agg = pd.concat([hours_agg, pd.DataFrame([hours_tot])], ignore_index=True)
 
     money_agg = df.groupby(["Dept"], dropna=False)[money_cols].sum().reset_index() if money_cols else pd.DataFrame(columns=["Dept"])
     money_agg.insert(0, "SalonName", "")
@@ -2170,6 +2256,16 @@ def build_combined_pdf_geoff(input_csv_path: str, keys_csv_path: str, output_pdf
     df_std["Tips"] = _colnum("CREDIT TIPS (Earn $)")
     df_std["Pay Rate"] = _colnum("Pay Rate")
 
+    return hours_agg, money_agg, df_std, hours_cols, money_cols
+
+
+def build_combined_pdf_geoff(input_csv_path: str, keys_csv_path: str, output_pdf_path: str) -> str:
+    df = load_clean_biweekly_table_geoff(input_csv_path).copy()
+    if df.empty:
+        return build_combined_pdf(input_csv_path, keys_csv_path, output_pdf_path)
+
+    salon_totals = _parse_geoff_salon_summary_totals(input_csv_path)
+    hours_agg, money_agg, df_std, hours_cols, money_cols = _build_geoff_pdf_report_frames(df, salon_totals)
     add_df, sub_df, cross_msg = compute_cross_department_frames_from_df(df_std, keys_csv_path)
 
     styles = getSampleStyleSheet()

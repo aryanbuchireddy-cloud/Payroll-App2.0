@@ -471,6 +471,86 @@ def test_geoff_formatter_maps_training_to_breaks_paid_and_keeps_training_zero(mo
     assert out.loc[0, "E_Training_Hours"] == "0.00"
 
 
+def test_geoff_pdf_tables_restore_location_ot_total_hours_and_pay():
+    import pandas as pd
+    import payrollrunner_dbkeys_handyman as runner
+
+    payroll = pd.DataFrame(
+        [
+            {
+                "Employee": "Haley Arnold",
+                "Dept": "1067",
+                "Pay Rate": "0.00",
+                "FLOOR (Earn Hrs)": "10.00",
+                "CLOSING (Earn Hrs)": "1.50",
+                "BREAKS PAID (Earn Hrs)": "2.00",
+                "ADMIN (Earn Hrs)": "3.00",
+                "TRAINING (Earn Hrs)": "4.00",
+                "OVERTIME (Earn Hrs)": "50.00",
+                "BONUS (Earn $)": "20.00",
+                "COMMISSION (Earn $)": "30.00",
+                "CREDIT TIPS (Earn $)": "40.00",
+                "RECEPTIONISTS (Earn Hrs)": "5.00",
+            }
+        ]
+    )
+
+    salon_totals = pd.DataFrame(
+        [
+            {
+                "SalonName": "Example Salon",
+                "Dept": "1067",
+                "OT Dollars": 50.0,
+                "TOTAL Hours": 25.5,
+                "Pay": 420.0,
+            }
+        ]
+    )
+    hours_agg, money_agg, _df_std, hours_cols, money_cols = runner._build_geoff_pdf_report_frames(payroll, salon_totals)
+
+    assert "OVERTIME (Earn Hrs)" not in hours_cols
+    assert "OVERTIME (Earn Hrs)" not in hours_agg.columns
+    assert "OT Dollars" in hours_cols
+    assert "TOTAL Hours" in hours_cols
+    assert "Pay" in hours_cols
+    assert "Gross Pay" not in money_cols
+
+    location_hours = hours_agg.loc[hours_agg["Dept"].eq("1067")].iloc[0]
+
+    assert location_hours["Breaks Paid Hrs"] == pytest.approx(6.0)
+    assert location_hours["OT Dollars"] == pytest.approx(50.0)
+    assert location_hours["TOTAL Hours"] == pytest.approx(25.5)
+    assert location_hours["Pay"] == pytest.approx(420.0)
+
+
+def test_geoff_salon_summary_parser_reads_ot_dollars_total_hours_and_pay():
+    import payrollrunner_dbkeys_handyman as runner
+
+    report = ROOT / ".pytest-tmp" / "geoff_summary_report.csv"
+    report.parent.mkdir(exist_ok=True)
+    report.write_text(
+        "\n".join(
+            [
+                '"Payroll Detail Report - Biweekly","Example Salon #1067"',
+                '"SALON TOTALS"',
+                '"OT Hrs","2.00","","75.50"',
+                '"TOTALS*","25.50","","420.00"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    totals = runner._parse_geoff_salon_summary_totals(str(report))
+    location = totals.iloc[0]
+
+    assert location["SalonName"] == "Example Salon"
+    assert location["Dept"] == "1067"
+    assert location["OT Dollars"] == pytest.approx(75.5)
+    assert location["TOTAL Hours"] == pytest.approx(25.5)
+    assert location["Pay"] == pytest.approx(420.0)
+
+
 def test_employee_alias_keys_handles_float_nan_names():
     import payrollrunner_dbkeys_handyman as runner
 
