@@ -392,7 +392,11 @@ async def _click_multiclient_change_button(page: Page, pick: Dict[str, Any]) -> 
         if not still_multiclient:
             return True
 
-    return True
+    print(
+        "Heartland MultiClient button did not leave client selection "
+        f"after repeated checks. url_after={url_after}"
+    )
+    return False
 
 
 async def _click_multiaccount_select_button(page: Page, pick: Dict[str, Any]) -> bool:

@@ -9,6 +9,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PORTAL_SOURCE = (ROOT / "tester8_admin_handyman.py").read_text(encoding="utf-8")
 RUNNER_SOURCE = (ROOT / "payrollrunner_dbkeys_handyman.py").read_text(encoding="utf-8")
+MULTI_TENANT_SOURCE = (ROOT / "multi_tenant_profiles.py").read_text(encoding="utf-8")
 
 
 def _function_source(source: str, name: str) -> str:
@@ -54,6 +55,29 @@ def test_heartland_login_separates_readiness_and_payroll_state():
     assert readiness_branch, "readiness branch should update only readiness_status"
     assert 'substate="awaiting_mfa"' in readiness_branch.group(0)
     assert '"payroll.state"' not in readiness_branch.group(0)
+
+
+def test_heartland_login_verifies_authenticated_client_url_not_welcome_text():
+    import payrollrunner_dbkeys_handyman as runner
+
+    login_fn = _async_function_source(RUNNER_SOURCE, "_heartland_login")
+
+    assert runner._heartland_client_page_kind(
+        "https://www.heartlandpayroll.com/Clients/General/Summary"
+    ) == "client_home"
+    assert runner._heartland_client_page_kind(
+        "https://www.heartlandpayroll.com/Dashboard/DashboardPartial/MultiClient"
+    ) == "multi_client"
+    assert "_wait_for_heartland_client_home(page)" in login_fn
+    assert r"text=/\b(?:Welcome|General)\b/i" not in login_fn
+
+
+def test_multiclient_click_is_not_successful_while_picker_remains_visible():
+    fn = _async_function_source(MULTI_TENANT_SOURCE, "_click_multiclient_change_button")
+
+    assert "if not still_multiclient:" in fn
+    assert "did not leave client selection" in fn
+    assert fn.rstrip().endswith("return False")
 
 
 def test_mfa_wait_is_scoped_to_run_id_or_session_id():

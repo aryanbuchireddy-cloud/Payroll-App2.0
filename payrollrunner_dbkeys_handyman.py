@@ -1157,6 +1157,60 @@ def load_clean_biweekly_table_for_user(csv_path: str, username: str) -> pd.DataF
     return load_clean_biweekly_table(csv_path)
 
 # ---------- Heartland login + MFA ----------
+def _heartland_client_page_kind(url: str) -> str:
+    low = (url or "").lower()
+    if "/dashboard/dashboardpartial/multiclient" in low:
+        return "multi_client"
+    if (
+        "/clients/general/summary" in low
+        or "/payroll/" in low
+        or "/reports/" in low
+        or "/hr/" in low
+    ):
+        return "client_home"
+    return "unknown"
+
+
+async def _wait_for_heartland_client_home(page: Page, timeout_sec: int = 90) -> None:
+    deadline = time.time() + max(1, timeout_sec)
+    last_url = ""
+    last_body = ""
+
+    while time.time() < deadline:
+        last_url = page.url or ""
+        page_kind = _heartland_client_page_kind(last_url)
+        try:
+            last_body = re.sub(
+                r"\s+",
+                " ",
+                await page.locator("body").inner_text(timeout=3000),
+            ).strip()
+        except Exception:
+            last_body = ""
+
+        if page_kind == "multi_client":
+            raise RuntimeError(
+                "Heartland is still waiting for client selection. "
+                f"Final URL: {last_url}"
+            )
+
+        if page_kind == "client_home":
+            nav = page.get_by_text(re.compile(r"^(?:Dashboard|Payroll|Reports)$", re.I)).first
+            try:
+                await nav.wait_for(state="visible", timeout=3000)
+                print(f"Heartland authenticated client page loaded. URL={last_url}")
+                return
+            except Exception:
+                pass
+
+        await page.wait_for_timeout(1000)
+
+    raise RuntimeError(
+        "Heartland did not reach an authenticated client page after login. "
+        f"Final URL: {last_url}. Final page: {last_body[:500]}"
+    )
+
+
 async def _heartland_login(page: Page, hl_user: str, hl_pass: str, username: str, *, flow: str = "payroll", run_id: str | None = None) -> None:
     """
     Log into Heartland and complete MFA, ending on the Dashboard.
@@ -1426,7 +1480,7 @@ async def _heartland_login(page: Page, hl_user: str, hl_pass: str, username: str
     #await _maybe_select_multi_account(page, username)
     #await _maybe_select_multi_client(page, username)
 
-    await page.wait_for_selector(r"text=/\b(?:Welcome|General)\b/i", timeout=300000)
+    await _wait_for_heartland_client_home(page)
     try:
         if flow == "readiness":
             _set_flow_mfa_state(username, flow=flow, run_id=run_id, substate="")
