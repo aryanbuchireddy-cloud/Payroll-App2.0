@@ -1159,6 +1159,8 @@ def load_clean_biweekly_table_for_user(csv_path: str, username: str) -> pd.DataF
 # ---------- Heartland login + MFA ----------
 def _heartland_client_page_kind(url: str) -> str:
     low = (url or "").lower()
+    if "/account/multiaccountselection" in low:
+        return "multi_account"
     if "/dashboard/dashboardpartial/multiclient" in low:
         return "multi_client"
     if (
@@ -1187,6 +1189,12 @@ async def _wait_for_heartland_client_home(page: Page, timeout_sec: int = 90) -> 
             ).strip()
         except Exception:
             last_body = ""
+
+        if page_kind == "multi_account":
+            raise RuntimeError(
+                "Heartland is still waiting for profile selection. "
+                f"Final URL: {last_url}"
+            )
 
         if page_kind == "multi_client":
             raise RuntimeError(

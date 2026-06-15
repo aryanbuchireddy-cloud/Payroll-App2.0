@@ -488,10 +488,14 @@ async def _click_multiaccount_select_button(page: Page, pick: Dict[str, Any]) ->
 
     if match:
         try:
-            row = page.locator("tr").filter(has_text=re.compile(re.escape(match), re.I)).first
+            row = page.locator(
+                "tr, [role='row'], .mat-row, .mat-mdc-row, "
+                "[class*='grid-row'], [class*='table-row']"
+            ).filter(has_text=re.compile(re.escape(match), re.I)).first
             row_button = row.locator(
                 "button:has-text('Select'), "
-                "[id*='multiAccountSelection'][id*='select-btn'][id$='innerButton']"
+                "[id*='multiAccountSelection'][id*='select-btn'][id$='innerButton'], "
+                "[role='button']:has-text('Select')"
             )
             label = f"row Select button for {match!r}"
             attempted.append(label)
@@ -573,6 +577,35 @@ async def _screen_seems_like_selection(page: Page) -> bool:
         "payroll-dashboard-multiclient",
     ]
     return any(c in txt or c in url for c in explicit_selection_clues)
+
+
+async def _screen_seems_like_multiaccount(page: Page) -> bool:
+    txt = (await _visible_text(page)).lower()
+    try:
+        url = (page.url or "").lower()
+    except Exception:
+        url = ""
+    try:
+        has_multiaccount_id = await page.locator("[id*='payroll-multiAccountSelection']").count() > 0
+    except Exception:
+        has_multiaccount_id = False
+    return (
+        "multiaccountselection" in url
+        or "select a profile to log into" in txt
+        or bool(has_multiaccount_id)
+    )
+
+
+async def _screen_seems_like_multiclient(page: Page) -> bool:
+    txt = (await _visible_text(page)).lower()
+    try:
+        url = (page.url or "").lower()
+    except Exception:
+        url = ""
+    return (
+        "dashboardpartial/multiclient" in url
+        or ("multi - client" in txt and "go to client" in txt)
+    )
 
 
 async def _screen_seems_like_heartland_home(page: Page) -> bool:
@@ -685,6 +718,9 @@ async def handle_heartland_post_login_selection_flow(
                         task_name="profile / account type",
                         handyman=handyman,
                     )
+                    if ok:
+                        await page.wait_for_timeout(tenant.wait_after_click_ms)
+                        ok = not await _screen_seems_like_multiaccount(page)
                 if ok:
                     did_something = True
                     await log_event("selected_profile", str(profile_pick))
@@ -703,6 +739,9 @@ async def handle_heartland_post_login_selection_flow(
                         task_name="client / company",
                         handyman=handyman,
                     )
+                    if ok:
+                        await page.wait_for_timeout(tenant.wait_after_click_ms)
+                        ok = not await _screen_seems_like_multiclient(page)
                 if ok:
                     did_something = True
                     await log_event("selected_client", str(client_pick))
@@ -723,8 +762,9 @@ async def handle_heartland_post_login_selection_flow(
             return {"ok": True, "reason": "completed", "events": events, "profile": tenant.raw}
 
         if not did_something and not still_selection:
-            await log_event("done", "No more Heartland selection screens detected.")
-            return {"ok": True, "reason": "completed", "events": events, "profile": tenant.raw}
+            await log_event("waiting", "Unknown post-login page; waiting for a confirmed client page.")
+            await page.wait_for_timeout(tenant.wait_after_click_ms)
+            continue
 
         if did_something:
             continue

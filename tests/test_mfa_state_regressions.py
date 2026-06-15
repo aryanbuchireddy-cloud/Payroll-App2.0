@@ -66,6 +66,9 @@ def test_heartland_login_verifies_authenticated_client_url_not_welcome_text():
         "https://www.heartlandpayroll.com/Clients/General/Summary"
     ) == "client_home"
     assert runner._heartland_client_page_kind(
+        "https://www.heartlandpayroll.com/Account/MultiAccountSelection"
+    ) == "multi_account"
+    assert runner._heartland_client_page_kind(
         "https://www.heartlandpayroll.com/Dashboard/DashboardPartial/MultiClient"
     ) == "multi_client"
     assert "_wait_for_heartland_client_home(page)" in login_fn
@@ -78,6 +81,24 @@ def test_multiclient_click_is_not_successful_while_picker_remains_visible():
     assert "if not still_multiclient:" in fn
     assert "did not leave client selection" in fn
     assert fn.rstrip().endswith("return False")
+
+
+def test_tenant_selection_never_treats_unknown_or_unchanged_picker_as_success():
+    fn = _async_function_source(MULTI_TENANT_SOURCE, "handle_heartland_post_login_selection_flow")
+
+    assert "ok = not await _screen_seems_like_multiaccount(page)" in fn
+    assert "ok = not await _screen_seems_like_multiclient(page)" in fn
+    assert "Unknown post-login page; waiting for a confirmed client page." in fn
+    assert "No more Heartland selection screens detected." not in fn
+
+
+def test_multiaccount_partner_row_selector_supports_headless_grid_layouts():
+    fn = _async_function_source(MULTI_TENANT_SOURCE, "_click_multiaccount_select_button")
+
+    assert "[role='row']" in fn
+    assert ".mat-mdc-row" in fn
+    assert "[class*='grid-row']" in fn
+    assert "[role='button']:has-text('Select')" in fn
 
 
 def test_mfa_wait_is_scoped_to_run_id_or_session_id():
