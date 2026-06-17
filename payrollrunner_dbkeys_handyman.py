@@ -2052,10 +2052,9 @@ def compute_cross_department_frames_from_df(df: pd.DataFrame, keys_csv_path: str
     keys[col] = keys[col].fillna("").astype(str).str.strip()
     keys[col] = keys[col].mask(keys[col].str.lower().isin(["nan", "none", "<na>"]), "")
 
-    keys["Employee"] = keys["Employee"].astype(str).map(_name_norm)
-    keys["Home"] = keys.get("Department", "").astype(str).map(_clean_dept)
-
-    merged = df.merge(keys[["Employee", "Home"]], on="Employee", how="left")
+    home_lookup = _employee_home_dept_lookup(keys)
+    merged = df.copy()
+    merged["Home"] = merged["Employee"].map(lambda name: _lookup_employee_home_dept(name, home_lookup))
     merged["Worked"] = merged["Dept"].map(_clean_dept)
     merged["Home"] = merged["Home"].map(_clean_dept)
 
@@ -2511,11 +2510,31 @@ def _employee_key_lookup(keys_df: pd.DataFrame) -> dict[str, str]:
     return lookup
 
 
+def _employee_home_dept_lookup(keys_df: pd.DataFrame) -> dict[str, str]:
+    keys_df = _clean_keys_df(keys_df)
+    lookup: dict[str, str] = {}
+    for _, row in keys_df.iterrows():
+        dept = _clean_dept(row.get("Department") or "")
+        if not dept:
+            continue
+        for alias in _employee_alias_keys(str(row.get("Employee") or "")):
+            lookup.setdefault(alias, dept)
+    return lookup
+
+
 def _lookup_employee_key(name: str, lookup: dict[str, str]) -> str:
     for alias in _employee_alias_keys(name):
         key = str(lookup.get(alias) or "").strip()
         if key:
             return key
+    return ""
+
+
+def _lookup_employee_home_dept(name: str, lookup: dict[str, str]) -> str:
+    for alias in _employee_alias_keys(name):
+        dept = _clean_dept(lookup.get(alias) or "")
+        if dept:
+            return dept
     return ""
 
 

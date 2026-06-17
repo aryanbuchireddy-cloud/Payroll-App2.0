@@ -478,6 +478,36 @@ def test_employee_key_lookup_handles_heartland_name_variants():
     assert runner._lookup_employee_key("Haley Arnold", lookup) == "584"
 
 
+def test_cross_department_uses_employee_aliases_for_home_department(monkeypatch):
+    import pandas as pd
+    import payrollrunner_dbkeys_handyman as runner
+
+    payroll = pd.DataFrame(
+        [
+            {
+                "Employee": "Tami Reynolds",
+                "Dept": "1067",
+                "Pay Rate": "0.00",
+                "E_Regular_Hours": "8.00",
+                "E_Overtime_Hours": "0.00",
+                "Productivity": "0.00",
+                "Prod Bonus": "0.00",
+                "Tips": "0.00",
+            }
+        ]
+    )
+    keys = pd.DataFrame([{"Employee": "Tami Reynolds-Ray", "Key": "518", "Department": "9249"}])
+    monkeypatch.setattr(runner, "load_employee_keys_df", lambda username: keys)
+
+    add_df, sub_df, message = runner.compute_cross_department_frames_from_df(payroll, "quopayroll@gmail.com")
+
+    assert message is None
+    assert add_df.loc[0, "Employee"] == "Tami Reynolds"
+    assert add_df.loc[0, "Worked"] == "1067"
+    assert add_df.loc[0, "Home"] == "9249"
+    assert sub_df.loc[0, "Regular Hrs"] == "-8.00"
+
+
 def test_geoff_formatter_maps_training_to_breaks_paid_and_keeps_training_zero(monkeypatch):
     import pandas as pd
     import payrollrunner_dbkeys_handyman as runner
